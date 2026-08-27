@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>边框/装饰布局方案</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #0f1620;
+        --text: #e7eef7;
+        --muted: #9fb0c1;
+        --stroke: rgba(255, 255, 255, 0.12);
+        --accent: #66b3ff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans", sans-serif;
+        background: radial-gradient(1200px 600px at 20% 0%, rgba(102, 179, 255, 0.12), transparent 60%),
+          radial-gradient(900px 500px at 90% 10%, rgba(255, 176, 102, 0.10), transparent 55%),
+          var(--bg);
+        color: var(--text);
+      }
+      header {
+        padding: 18px 18px 10px;
+        border-bottom: 1px solid var(--stroke);
+        background: rgba(15, 22, 32, 0.65);
+        backdrop-filter: blur(10px);
+        position: sticky;
+        top: 0;
+        z-index: 5;
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 6px;
+        letter-spacing: 0.2px;
+      }
+      .subtitle {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+      main {
+        padding: 18px;
+        max-width: 1180px;
+        margin: 0 auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+      @media (max-width: 960px) {
+        .grid { grid-template-columns: 1fr; }
+      }
+      .card {
+        border: 1px solid var(--stroke);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.02));
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .card-head {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        padding: 12px 12px 0;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 9px;
+        background: rgba(102, 179, 255, 0.16);
+        border: 1px solid rgba(102, 179, 255, 0.35);
+        color: var(--text);
+        font-weight: 700;
+        letter-spacing: 0.4px;
+      }
+      .card h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+      .card p {
+        margin: 8px 12px 12px;
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.45;
+      }
+      .mock {
+        margin: 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        background: #07101a;
+        aspect-ratio: 16 / 11;
+        position: relative;
+        overflow: hidden;
+      }
+      .mock .img {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(135deg, rgba(40, 110, 160, 0.38), rgba(20, 36, 52, 0.92));
+      }
+      .region {
+        position: absolute;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .label {
+        position: absolute;
+        padding: 6px 8px;
+        font-size: 10.5px;
+        color: rgba(255, 255, 255, 0.85);
+        background: rgba(10, 16, 22, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 8px;
+        white-space: nowrap;
+      }
+      .muted {
+        color: rgba(255, 255, 255, 0.65);
+      }
+      .legend {
+        position: absolute;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.25), rgba(255, 255, 255, 0.06));
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 10px;
+      }
+      .legend .ticks {
+        position: absolute;
+        inset: 8px;
+        border-left: 1px solid rgba(255, 255, 255, 0.22);
+      }
+      .legend.h .ticks {
+        border-left: none;
+        border-top: 1px solid rgba(255, 255, 255, 0.22);
+      }
+      footer {
+        margin-top: 14px;
+        padding: 12px;
+        border-top: 1px solid var(--stroke);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .kbd {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.04);
+        color: rgba(255, 255, 255, 0.86);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>边框 / 标题 / 色标布局方案（用于 --decorations）</h1>
+      <p class="subtitle">你看完直接回我选 <span class="kbd">A/B/C/D</span>。目标：减少右侧空白、信息更好读、画面更干净。</p>
+    </header>
+    <main>
+      <div class="grid">
+        <section class="card">
+          <div class="card-head">
+            <div class="badge">A</div>
+            <h2>紧凑右侧色标（外置但不挤占画面）</h2>
+          </div>
+          <p>保持“右侧竖色标”习惯，但把主图拉满到右侧，只留一个很窄的色标槽；底部信息条保留。</p>
+          <div class="mock">
+            <div class="img"></div>
+            <div class="region" style="left: 4%; top: 4%; width: 86%; height: 86%;"></div>
+            <div class="legend" style="right: 4%; top: 8%; width: 5%; height: 80%;">
+              <div class="ticks"></div>
+            </div>
+            <div class="label" style="left: 6%; bottom: 6%;">标题</div>
+            <div class="label muted" style="left: 44%; bottom: 6%;">时间</div>
+            <div class="label muted" style="right: 10%; top: 6%;">dmax/dmin</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div class="badge">B</div>
+            <h2>底部横向色标（最大化画面宽度）</h2>
+          </div>
+          <p>完全取消右侧色标，改为底部横向色标；底部做一条“信息栏”：左标题、中时间、右范围。</p>
+          <div class="mock">
+            <div class="img"></div>
+            <div class="region" style="left: 4%; top: 4%; width: 92%; height: 78%;"></div>
+            <div class="region" style="left: 4%; top: 84%; width: 92%; height: 12%; border-style: dashed;"></div>
+            <div class="legend h" style="left: 28%; top: 86.5%; width: 44%; height: 7%;">
+              <div class="ticks"></div>
+            </div>
+            <div class="label" style="left: 6%; top: 86%;">标题</div>
+            <div class="label muted" style="left: 18%; top: 86%;">时间</div>
+            <div class="label muted" style="right: 6%; top: 86%;">dmax/dmin</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div class="badge">C</div>
+            <h2>内嵌色标（画布最紧凑）</h2>
+          </div>
+          <p>色标放到图内侧右边缘（半透明底），不增加画布尺寸；信息文本也放图内侧角落，整体最“干净”。</p>
+          <div class="mock">
+            <div class="img"></div>
+            <div class="region" style="left: 4%; top: 4%; width: 92%; height: 92%;"></div>
+            <div class="legend" style="right: 6%; top: 10%; width: 5%; height: 76%; background: rgba(10,16,22,0.55);">
+              <div class="ticks" style="inset: 10px;"></div>
+            </div>
+            <div class="label" style="left: 7%; bottom: 7%;">标题 · 时间</div>
+            <div class="label muted" style="right: 7%; top: 7%;">dmax/dmin</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div class="badge">D</div>
+            <h2>右侧信息栏（色标 + 元数据堆叠）</h2>
+          </div>
+          <p>固定一个窄右栏：上部显示范围/类型，中部竖色标，底部时间；主图永远对齐、观感更“规整”。</p>
+          <div class="mock">
+            <div class="img"></div>
+            <div class="region" style="left: 4%; top: 4%; width: 80%; height: 92%;"></div>
+            <div class="region" style="right: 4%; top: 4%; width: 14%; height: 92%; border-style: dashed;"></div>
+            <div class="label muted" style="right: 6%; top: 6%;">类型/波段</div>
+            <div class="label muted" style="right: 6%; top: 16%;">dmax/dmin</div>
+            <div class="legend" style="right: 6.5%; top: 28%; width: 6%; height: 52%;">
+              <div class="ticks"></div>
+            </div>
+            <div class="label muted" style="right: 6%; bottom: 6%;">时间</div>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        <div>选择建议：</div>
+        <div>如果你希望尽量保持现有风格但去掉“右侧挤压/留白”，选 <span class="kbd">A</span>；</div>
+        <div>如果你希望画面最满、阅读最舒服，选 <span class="kbd">B</span>；</div>
+        <div>如果你希望最紧凑、最像“业务图叠加层”，选 <span class="kbd">C</span>；</div>
+        <div>如果你希望右侧信息规整对齐、模板化输出，选 <span class="kbd">D</span>。</div>
+      </footer>
+    </main>
+  </body>
+</html>
+

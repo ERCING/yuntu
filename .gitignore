@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.dbg/
+debug-*.md
+data/
+himawari_ir_toolkit/data/
+build/

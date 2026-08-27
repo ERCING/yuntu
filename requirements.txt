@@ -1,0 +1,11 @@
+numpy>=2.1
+pandas>=2.2
+matplotlib>=3.9
+cartopy>=0.24
+Pillow>=11.0
+pycontrails>=0.56
+xarray>=2024.10
+s3fs>=2024.10
+h5netcdf>=1.4
+h5py>=3.12
+pyinstaller>=6.11
