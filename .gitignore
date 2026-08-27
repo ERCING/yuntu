@@ -5,3 +5,6 @@ debug-*.md
 data/
 himawari_ir_toolkit/data/
 build/
+.venv/
+*.zip
+*.rar
