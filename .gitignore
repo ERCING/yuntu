@@ -4,7 +4,16 @@ __pycache__/
 debug-*.md
 data/
 himawari_ir_toolkit/data/
-build/
+himawari_ir_toolkit/pycontrails_cache/
+
+# 虚拟环境
 .venv/
-*.zip
+
+# PyInstaller 构建与发布产物
+build/
+release/
+dist/
+
+# 分发压缩包不入库
 *.rar
+*.zip

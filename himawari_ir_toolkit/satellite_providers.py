@@ -1,50 +1,9 @@
 from dataclasses import dataclass
 from datetime import date, datetime
-import json
-import os
 import re
 import sys
-import urllib.request
 
 import numpy as np
-
-
-# #region debug-point helper:goes-trial-reporter
-
-def _debug_report(hypothesis_id, location, msg, data=None, run_id="pre-fix"):
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.dbg', 'goes-trial.env')
-    url = 'http://127.0.0.1:7777/event'
-    session_id = 'goes-trial'
-    try:
-        with open(env_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('DEBUG_SERVER_URL='):
-                    url = line.split('=', 1)[1].strip()
-                elif line.startswith('DEBUG_SESSION_ID='):
-                    session_id = line.split('=', 1)[1].strip()
-    except Exception:
-        pass
-    payload = {
-        "sessionId": session_id,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "msg": msg,
-        "data": data or {},
-    }
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=1,
-        ).read()
-    except Exception:
-        pass
-
-# #endregion
 
 from himawari_ir_toolkit.satellite_scene import ProjectionMetadata, Scene
 
@@ -244,126 +203,79 @@ def goes_cmipf_prefix(platform, requested_time):
 
 
 def load_goes_scene(platform, requested_time, data_type, band, *, fs=None, open_dataset=None):
+    config = get_provider_config(platform)
+    validate_archive_date(platform, requested_time)
+    channels = get_source_channels(platform, data_type, band)
+    slot = requested_time.strftime("%Y-%m-%d %H:%M:%S")
+    if (
+        requested_time.minute not in config.minutes
+        or requested_time.second != 0
+        or requested_time.microsecond != 0
+    ):
+        raise ValueError(f"Invalid CMIPF slot for {platform} at {slot} UTC")
+
+    missing = []
+    if fs is None:
+        try:
+            import s3fs
+        except ImportError:
+            missing.append("s3fs")
+    if open_dataset is None:
+        try:
+            import xarray as xr
+        except ImportError:
+            missing.append("xarray")
+    if missing:
+        raise ValueError(f"Missing optional GOES loader package(s): {', '.join(missing)}")
+    if fs is None:
+        fs = s3fs.S3FileSystem(anon=True)
+    if open_dataset is None:
+        open_dataset = xr.open_dataset
+
+    prefix = goes_cmipf_prefix(platform, requested_time)
     try:
-        config = get_provider_config(platform)
-        validate_archive_date(platform, requested_time)
-        channels = get_source_channels(platform, data_type, band)
-        slot = requested_time.strftime("%Y-%m-%d %H:%M:%S")
-        if (
-            requested_time.minute not in config.minutes
-            or requested_time.second != 0
-            or requested_time.microsecond != 0
-        ):
-            raise ValueError(f"Invalid CMIPF slot for {platform} at {slot} UTC")
-        # #region debug-point A:validated-goes-request
-        _debug_report("A", "satellite_providers.py:load_goes_scene", "[DEBUG] GOES request validated", {
-            "platform": platform,
-            "slot": slot,
-            "data_type": data_type,
-            "band": band,
-            "channels": channels,
-        })
-        # #endregion
+        paths = [path for path in fs.ls(prefix) if path.startswith(prefix)]
+    except FileNotFoundError as error:
+        raise ValueError(f"No CMIPF scan for {platform} at {slot} UTC") from error
 
-        missing = []
-        if fs is None:
-            try:
-                import s3fs
-            except ImportError:
-                missing.append("s3fs")
-        if open_dataset is None:
-            try:
-                import xarray as xr
-            except ImportError:
-                missing.append("xarray")
-        if missing:
-            raise ValueError(f"Missing optional GOES loader package(s): {', '.join(missing)}")
-        if fs is None:
-            fs = s3fs.S3FileSystem(anon=True)
-        if open_dataset is None:
-            open_dataset = xr.open_dataset
+    selected = {}
+    scan_times = {}
+    for channel in channels:
+        path = select_goes_scan_object(paths, platform, channel, requested_time)
+        parsed = _parse_goes_scan_object(path)
+        selected[channel] = path
+        scan_times[channel] = (parsed[2], parsed[3])
 
-        prefix = goes_cmipf_prefix(platform, requested_time)
-        try:
-            paths = [path for path in fs.ls(prefix) if path.startswith(prefix)]
-        except FileNotFoundError as error:
-            raise ValueError(f"No CMIPF scan for {platform} at {slot} UTC") from error
-        # #region debug-point B:listed-goes-objects
-        _debug_report("B", "satellite_providers.py:load_goes_scene", "[DEBUG] GOES objects listed", {
-            "prefix": prefix,
-            "path_count": len(paths),
-        })
-        # #endregion
-        selected = {}
-        scan_times = {}
+    if len(set(scan_times.values())) != 1:
+        raise ValueError(f"GOES scan time metadata inconsistent for {platform} at {slot} UTC")
+    scan_start, scan_end = next(iter(scan_times.values()))
+
+    datasets = {}
+    handles = []
+    scene_owns_datasets = False
+    try:
         for channel in channels:
-            path = select_goes_scan_object(paths, platform, channel, requested_time)
-            parsed = _parse_goes_scan_object(path)
-            selected[channel] = path
-            scan_times[channel] = (parsed[2], parsed[3])
-            # #region debug-point B:selected-goes-channel
-            _debug_report("B", "satellite_providers.py:load_goes_scene", "[DEBUG] GOES channel selected", {
-                "channel": channel,
-                "basename": os.path.basename(path),
-                "scan_start": parsed[2].isoformat(),
-                "scan_end": parsed[3].isoformat(),
-            })
-            # #endregion
-
-        if len(set(scan_times.values())) != 1:
-            raise ValueError(f"GOES scan time metadata inconsistent for {platform} at {slot} UTC")
-        scan_start, scan_end = next(iter(scan_times.values()))
-
-        datasets = {}
-        handles = []
-        scene_owns_datasets = False
-        try:
-            for channel in channels:
-                handle = fs.open(selected[channel], "rb")
-                handles.append(handle)
-                datasets[channel] = open_dataset(handle, engine="h5netcdf")
-                # #region debug-point C:opened-goes-dataset
-                _debug_report("C", "satellite_providers.py:load_goes_scene", "[DEBUG] GOES dataset opened", {
-                    "channel": channel,
-                })
-                # #endregion
-            scene_owns_datasets = True
-            scene = scene_from_goes_datasets(
-                platform, data_type, band, datasets, scan_start, scan_end
-            )
-            # #region debug-point C:created-goes-scene
-            _debug_report("C", "satellite_providers.py:load_goes_scene", "[DEBUG] GOES scene created", {
-                "platform": platform,
-                "source_channels": scene.source_channels,
-                "data_shape": scene.data.shape,
-                "x_count": len(scene.x_scan_rad),
-                "y_count": len(scene.y_scan_rad),
-                "projection_lon0": scene.projection.longitude_of_projection_origin,
-            })
-            # #endregion
-            return scene
-        except BaseException:
-            if not scene_owns_datasets:
-                for dataset in datasets.values():
-                    try:
-                        dataset.close()
-                    except BaseException:
-                        pass
-            raise
-        finally:
-            for handle in handles:
+            handle = fs.open(selected[channel], "rb")
+            handles.append(handle)
+            datasets[channel] = open_dataset(handle, engine="h5netcdf")
+        scene_owns_datasets = True
+        return scene_from_goes_datasets(
+            platform, data_type, band, datasets, scan_start, scan_end
+        )
+    except BaseException:
+        if not scene_owns_datasets:
+            for dataset in datasets.values():
                 try:
-                    handle.close()
+                    dataset.close()
                 except BaseException:
                     pass
-    except BaseException as error:
-        # #region debug-point E:goes-loader-error
-        _debug_report("E", "satellite_providers.py:load_goes_scene", "[DEBUG] GOES loader raised exception", {
-            "error_type": type(error).__name__,
-            "error": str(error),
-        })
-        # #endregion
         raise
+    finally:
+        for handle in handles:
+            try:
+                handle.close()
+            except BaseException:
+                pass
 
 
 def _parse_goes_scan_object(path):

@@ -5,6 +5,10 @@ cartopy>=0.24
 Pillow>=11.0
 pycontrails>=0.56
 xarray>=2024.10
+# s3fs 运行时依赖 fsspec / aiohttp；二者在 HimawariIRToolkit.spec 中被 collect_all 全量收集，
+# 这里显式声明，避免上游改了传递依赖后打包静默丢失
+fsspec>=2024.10
+aiohttp>=3.9
 s3fs>=2024.10
 h5netcdf>=1.4
 h5py>=3.12

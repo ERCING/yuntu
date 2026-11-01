@@ -21,20 +21,23 @@ Himawari-9 卫星云图绘制脚本
 import sys
 import os
 import argparse
-import json
-import urllib.request
 import warnings
 from datetime import datetime, timezone
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+
+# 仅在 CLI 直接运行时才强制切换 Agg 后端；作为库被 GUI 导入时不得改动进程级后端，
+# 否则 matplotlib>=3.8 的 use() 默认 force=True 会把 GUI 已设的 TkAgg 覆盖掉。
+if __name__ == '__main__':
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import matplotlib.ticker as mticker
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 
-warnings.filterwarnings('ignore')
+# 仅对已知无害的第三方告警做精确降噪；不要用全局 filterwarnings('ignore')，
+# 那会连宿主 GUI 进程的 xarray/cartopy 诊断告警一并吞掉。
+warnings.filterwarnings('ignore', category=FutureWarning, module='pycontrails.*')
+warnings.filterwarnings('ignore', message='.*Downloading.*', category=UserWarning)
 
 # 设置 pycontrails 缓存目录到项目目录，避免沙箱限制
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,53 +45,20 @@ CACHE_DIR = os.path.join(PROJECT_DIR, 'pycontrails_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ['PYCONTRAILS_CACHE_DIR'] = CACHE_DIR
 
-# #region debug-point helper:goes-trial-reporter
-
-def _debug_report(hypothesis_id, location, msg, data=None, run_id="pre-fix"):
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.dbg', 'goes-trial.env')
-    url = 'http://127.0.0.1:7777/event'
-    session_id = 'goes-trial'
-    try:
-        with open(env_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('DEBUG_SERVER_URL='):
-                    url = line.split('=', 1)[1].strip()
-                elif line.startswith('DEBUG_SESSION_ID='):
-                    session_id = line.split('=', 1)[1].strip()
-    except Exception:
-        pass
-    payload = {
-        "sessionId": session_id,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "msg": msg,
-        "data": data or {},
-    }
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=1,
-        ).read()
-    except Exception:
-        pass
-
-# #endregion
-
 # 导入自定义色阶
 if __package__:
     from .mycolor import color_map, my_color_map
-    from .satellite_providers import get_provider_config, load_goes_scene, validate_archive_date
+    from .satellite_providers import (
+        PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+    )
 else:
     PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if PACKAGE_ROOT not in sys.path:
         sys.path.insert(0, PACKAGE_ROOT)
     from himawari_ir_toolkit.mycolor import color_map, my_color_map
-    from himawari_ir_toolkit.satellite_providers import get_provider_config, load_goes_scene, validate_archive_date
+    from himawari_ir_toolkit.satellite_providers import (
+        PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+    )
 
 # ============================================================
 # 配置参数
@@ -172,7 +142,7 @@ def _download_s3_files_with_progress(
 
     for file_index, path in enumerate(paths, start=1):
         expected_size = int(fs.info(path)["size"])
-        actual_size = 0
+        content = b""  # 预置为空，杜绝重试全失败时的 UnboundLocalError
         for attempt in range(3):
             chunks = []
             try:
@@ -183,19 +153,18 @@ def _download_s3_files_with_progress(
                             break
                         chunks.append(chunk)
                 content = b"".join(chunks)
-                actual_size = len(content)
-                if actual_size != expected_size:
+                if len(content) != expected_size:
+                    # 传输截断：属于可重试错误，交给下一轮 attempt
                     raise ValueError(
-                        f"Incomplete download for {path}: expected {expected_size} bytes, actual {actual_size} bytes"
+                        f"Incomplete download for {path}: expected {expected_size} bytes, actual {len(content)} bytes"
                     )
                 break
-            except Exception:
+            except Exception as error:
                 if attempt == 2:
-                    if actual_size != expected_size:
-                        raise ValueError(
-                            f"Incomplete download for {path}: expected {expected_size} bytes, actual {actual_size} bytes"
-                        )
-                    raise
+                    raise ValueError(
+                        f"Download failed for {path} after 3 attempts: expected {expected_size} bytes, "
+                        f"actual {len(content)} bytes"
+                    ) from error
 
         downloaded_bytes += len(content)
         progress_callback(downloaded_bytes, total_bytes, file_offset + file_index, file_count)
@@ -301,8 +270,10 @@ def compute_target_lonlat_bounds(
     if not np.any(m):
         return None
 
-    proj4_params = getattr(geos_crs, "proj4_params", {})
-    lon0 = float(getattr(proj4_params, "get", lambda *_: 0.0)("lon_0", 0.0))
+    # proj4_params 是 cartopy 的 dict 属性；用 getattr 兜底是为兼容未来
+    # 可能改名/缺失的实现，避免 AttributeError 直接炸掉整个渲染。
+    proj4_params = getattr(geos_crs, "proj4_params", None) or {}
+    lon0 = float(proj4_params.get("lon_0", 0.0))
     lon = lon[m]
     lat = lat[m]
     lon = lon0 + (((lon - lon0 + 180.0) % 360.0) - 180.0)
@@ -549,7 +520,8 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
     if scheme not in dtype_config['schemes']:
         raise ValueError(f"Invalid scheme for {data_type}: {scheme}")
 
-    region_map = {"F": "FLDK", "J": "Japan", "T": "Target"}
+    # Himawari 侧区域别名映射；"Japan" 并非 pycontrails 支持的取值，故不提供 "J" 别名。
+    region_map = {"F": "FLDK", "T": "Target"}
     region_full = region_map.get(region, region)
     if region_full not in region_map.values():
         raise ValueError(f"Invalid region: {region}")
@@ -574,26 +546,7 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
         ):
             slot = requested_time.strftime("%Y-%m-%d %H:%M:%S")
             raise ValueError(f"Invalid CMIPF slot for {platform} at {slot} UTC")
-        # #region debug-point A:validated-goes-request
-        _debug_report("A", "draw_ir_fulldisk.py:draw_ir_fulldisk", "[DEBUG] GOES request validated", {
-            "platform": platform,
-            "time_utc": requested_time.isoformat(),
-            "data_type": data_type,
-            "band": band,
-            "scheme": scheme,
-            "region": region,
-        })
-        # #endregion
         scene = load_goes_scene(platform, requested_time, data_type, band)
-        # #region debug-point C:loaded-goes-scene
-        _debug_report("C", "draw_ir_fulldisk.py:draw_ir_fulldisk", "[DEBUG] GOES scene loaded", {
-            "platform": getattr(scene, "platform", platform),
-            "source_channels": getattr(scene, "source_channels", ()),
-            "data_shape": getattr(getattr(scene, "data", None), "shape", None),
-            "scan_start": getattr(getattr(scene, "scan_start", None), "isoformat", lambda: None)(),
-            "scan_end": getattr(getattr(scene, "scan_end", None), "isoformat", lambda: None)(),
-        })
-        # #endregion
         if out_path is None:
             scan_label = scene.scan_start.strftime("%Y-%m-%d_%H%M%S")
             out_dir = 'data'
@@ -602,26 +555,11 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
                 out_dir,
                 f"{platform.lower()}_{data_type}_{band}_FLDK_{scan_label}_{scheme}.png",
             )
-        # #region debug-point D:render-start
-        _debug_report("D", "draw_ir_fulldisk.py:draw_ir_fulldisk", "[DEBUG] GOES render started", {
-            "out_path": os.path.basename(out_path),
-            "dpi": dpi,
-            "decorations": add_decorations,
-        })
-        # #endregion
-        result = draw_satellite_scene(
+        return draw_satellite_scene(
             scene, scheme, out_path, dpi,
             add_decorations=add_decorations,
             progress_callback=progress_callback,
         )
-        # #region debug-point D:render-done
-        _debug_report("D", "draw_ir_fulldisk.py:draw_ir_fulldisk", "[DEBUG] GOES render completed", {
-            "out_path": os.path.basename(result[0]),
-            "data_shape": getattr(result[1], "shape", None),
-            "extent": result[2],
-        })
-        # #endregion
-        return result
 
     from pycontrails.datalib.himawari import Himawari
     is_bt = dtype_config['is_brightness_temp']
@@ -718,10 +656,6 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
         central_lon = round(central_lon, 1)
     else:
         central_lon = 140.7
-    
-    # 计算经纬度（用于网格线标注）
-    lon = np.degrees(np.arctan(x_proj / h)) + central_lon
-    lat = np.degrees(np.arctan(y_proj / h))
 
     # 获取色阶
     cmap, norm = my_color_map(scheme)
@@ -739,16 +673,7 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
     geos_crs = ccrs.Geostationary(central_longitude=central_lon,
                                    satellite_height=35785863.0,
                                    sweep_axis='x')
-    
-    # 判断使用哪种投影方式
-    if region_full == 'Target':
-        # 机动观测区域: 使用 Geostationary 投影保持原生分辨率
-        src_crs = geos_crs
-        src_extent = (x_proj.min(), x_proj.max(), y_proj.min(), y_proj.max())
-    else:
-        # 全圆盘/日本区域: 使用 Geostationary 卫星投影
-        src_crs = geos_crs
-        src_extent = (x_proj.min(), x_proj.max(), y_proj.min(), y_proj.max())
+    src_extent = (x_proj.min(), x_proj.max(), y_proj.min(), y_proj.max())
 
     # 设置matplotlib字体（解决中文乱码）
     plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'Microsoft YaHei', 'DejaVu Sans']
@@ -768,7 +693,7 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor='white')
 
     # 创建主绘图区
-    ax = fig.add_subplot(1, 1, 1, projection=src_crs)
+    ax = fig.add_subplot(1, 1, 1, projection=geos_crs)
     
     # 装饰模式: 为顶部信息栏和右侧色标预留紧凑空间
     subplot_adj = get_decoration_subplot_adjustments(region_full, add_decorations)
@@ -886,8 +811,9 @@ def build_parser():
                         help=f'数据类型: {", ".join(DATA_TYPES.keys())}, 默认: IR')
     parser.add_argument('--band', type=str, default=None,
                         help='波段: IR可选B13/B14, WV可选B08/B09/AVG (WV AVG), VIS可选B03, 默认使用各类型默认波段')
-    parser.add_argument('--platform', choices=('Himawari-9', 'GOES-18', 'GOES-19'), default='Himawari-9',
-                        help='卫星平台；GOES 限全圆盘和十分钟 UTC 槽位，默认: Himawari-9')
+    # choices 从 PROVIDER_CONFIGS 派生，避免新增平台时忘记同步 CLI（此前就漏了 GOES-16/17）
+    parser.add_argument('--platform', choices=tuple(PROVIDER_CONFIGS), default='Himawari-9',
+                        help=f'卫星平台: {", ".join(PROVIDER_CONFIGS)}；GOES 限全圆盘和十分钟 UTC 槽位，默认: Himawari-9')
     parser.add_argument('--list', action='store_true',
                         help='列出所有可用色阶')
     parser.add_argument('--dpi', type=int, default=150,
@@ -895,7 +821,7 @@ def build_parser():
     parser.add_argument('--out', type=str, default=None,
                         help='输出路径')
     parser.add_argument('--region', type=str, default='F',
-                        help='观测区域: F=全圆盘, J=日本区域, T=目标区域(机动观测), 默认: F')
+                        help='观测区域: F=全圆盘, T=目标区域(机动观测), 默认: F')
     parser.add_argument('--decorations', action='store_true',
                         help='添加边框、时间波段信息和右侧色阶柱')
     return parser

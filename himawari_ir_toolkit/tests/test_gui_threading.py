@@ -27,6 +27,43 @@ class _ProgressBar:
         self.value = kwargs.get("value", self.value)
 
 
+class _TextVar:
+    """最小 Tk 变量替身：只记录最后一次 set 的值。"""
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class _FakeLabel:
+    """最小 Label 替身：记录 configure 传入的选项。"""
+
+    def __init__(self):
+        self.options = {}
+
+    def configure(self, **kwargs):
+        self.options.update(kwargs)
+
+
+def _attach_status_widgets(app):
+    """补齐新版 UI 引入的状态栏、缩放标签与进度标签替身。
+
+    这些控件只在主线程的可视化反馈里使用，缺失会让 _show_status_feedback 抛
+    AttributeError，从而掩盖真正要验证的状态机行为。
+    """
+    app.status_var = _TextVar()
+    app.zoom_var = _TextVar()
+    app.progress_label = _FakeLabel()
+    if getattr(app, "root", None) is None:
+        app.root = _FakeRoot()
+    return app
+
+
 class _FakeRoot:
     def __init__(self):
         self.after_calls = []
@@ -44,11 +81,12 @@ class TestGUIStyles(unittest.TestCase):
         source = source_path.read_text(encoding="utf-8")
 
         for value in (
-            "Himawari / GOES 卫星云图分析工具",
-            "UTC 数据选择 · 卫星云图绘制",
+            "Satellite IR Toolkit",
+            "Himawari · GOES 云图分析",
             "时间与卫星",
             "数据与显示",
-            "绘制与输出",
+            "操作",
+            "状态",
             "日期时间 (UTC)",
             "绘制云图",
             "保存图片",
@@ -56,31 +94,44 @@ class TestGUIStyles(unittest.TestCase):
         ):
             self.assertIn(value, source)
 
-    def test_control_panel_uses_compact_fixed_row_spacing(self):
+    def test_sidebar_scrolls_so_all_controls_stay_reachable_at_minimum_size(self):
+        """最小窗口下侧边栏内容高于可视区，必须可滚动才能触达全部控件。"""
+        source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
+        source = source_path.read_text(encoding="utf-8")
+        sidebar_source = inspect.getsource(HimawariGUI._create_sidebar)
+
+        self.assertIn("1280x800", source)
+        self.assertIn("1024, 680", source)
+        self.assertIn("tk.Canvas(", sidebar_source)
+        self.assertIn("ttk.Scrollbar(", sidebar_source)
+        self.assertIn("canvas.configure(yscrollcommand=scrollbar.set)", sidebar_source)
+        self.assertIn("self._create_section_header(inner_frame", sidebar_source)
+
+    def test_sidebar_mousewheel_binding_does_not_hijack_image_canvas_zoom(self):
+        """侧边栏滚轮滚动必须限定在指针进入侧边栏时，否则会同时触发云图缩放。"""
+        sidebar_source = inspect.getsource(HimawariGUI._create_sidebar)
+
+        self.assertIn('canvas.bind("<Enter>"', sidebar_source)
+        self.assertIn('canvas.bind("<Leave>"', sidebar_source)
+        self.assertIn('canvas.unbind_all("<MouseWheel>")', sidebar_source)
+        self.assertNotIn(
+            "\n        canvas.bind_all(\"<MouseWheel>\", _on_mousewheel)\n",
+            sidebar_source,
+        )
+
+    def test_setup_styles_uses_light_professional_palette(self):
         source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
         source = source_path.read_text(encoding="utf-8")
 
+        for value in ("#f7f8fa", "#ffffff", "#2563eb", "#1f2937", "#6b7280", "Segoe UI"):
+            self.assertIn(value, source)
         for value in (
-            "datetime_frame.pack(fill=tk.X, pady=(0, 8))",
-            "platform_frame.pack(fill=tk.X, pady=(0, 8))",
-            "type_frame.pack(fill=tk.X, pady=(0, 8))",
-            "band_frame.pack(fill=tk.X, pady=(0, 8))",
-            "scheme_frame.pack(fill=tk.X, pady=(0, 8))",
-            "region_frame.pack(fill=tk.X, pady=(0, 10))",
+            "Primary.TButton",
+            "Secondary.TButton",
+            "Danger.TButton",
+            "Dark.TCombobox",
+            "Dark.Horizontal.TProgressbar",
         ):
-            self.assertIn(value, source)
-
-        self.assertEqual(source.count("style='Section.TLabel').pack(anchor=tk.W, pady=(0, 6))"), 3)
-
-    def test_setup_styles_uses_bright_research_palette(self):
-        source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
-        source = source_path.read_text(encoding="utf-8")
-
-        for value in ("#243447", "#607080", "#1769AA", "Segoe UI"):
-            self.assertIn(value, source)
-        self.assertNotIn("foreground='#000000'", source)
-        self.assertNotIn("text_color='#000000'", source)
-        for value in ("Primary.TButton", "Secondary.TButton", "Danger.TButton", "#FDECEC"):
             self.assertIn(value, source)
 
     def test_setup_styles_selects_clam_theme_for_custom_button_contrast(self):
@@ -98,19 +149,13 @@ class TestGUIStyles(unittest.TestCase):
         source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
         source = source_path.read_text(encoding="utf-8")
 
-        expected_foregrounds = {
-            "Primary.TButton": ("#607080", "white"),
-            "Secondary.TButton": ("#607080", "#243447"),
-            "Danger.TButton": ("#607080", "#9B2C2C"),
-        }
-        for style_name, (disabled, enabled) in expected_foregrounds.items():
+        for style_name in ("Primary.TButton", "Secondary.TButton", "Danger.TButton"):
             map_start = source.index(f"style.map('{style_name}'")
-            map_end = source.index("\n                  relief=", map_start)
+            map_end = source.index("style.", map_start + 10)
             style_map = source[map_start:map_end]
-            self.assertIn(
-                f"foreground=[('disabled', '{disabled}'), ('!disabled', '{enabled}')]",
-                style_map,
-            )
+            self.assertIn("'disabled'", style_map, f"{style_name} 缺少 disabled 前景色")
+            self.assertIn("'!disabled'", style_map, f"{style_name} 缺少启用态前景色")
+            self.assertIn("('disabled', TEXT_SUBTLE)", style_map, f"{style_name} disabled 前景色应统一为弱化灰")
 
     def test_status_feedback_defines_four_states_and_uses_each_lifecycle_state(self):
         source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
@@ -119,26 +164,38 @@ class TestGUIStyles(unittest.TestCase):
         draw_image_source = inspect.getsource(HimawariGUI._draw_image)
         success_source = inspect.getsource(HimawariGUI._on_draw_success)
         error_source = inspect.getsource(HimawariGUI._on_draw_error)
+        feedback_source = inspect.getsource(HimawariGUI._show_status_feedback)
+        status_color_source = inspect.getsource(HimawariGUI._get_status_color)
 
-        for value in (
-            "Working.Progress.TLabel",
-            "Success.Progress.TLabel",
-            "Error.Progress.TLabel",
-            "Ready.Progress.TLabel",
-            "after",
-            "after_cancel",
-            "#1769AA",
-            "#2E7D32",
-            "#B42318",
-            "#607080",
+        for kind in ("'Working'", "'Success'", "'Error'", "'Ready'"):
+            self.assertIn(kind, status_color_source)
+
+        # 四态配色必须取自浅色调色板。
+        # 调色板已提升为模块级常量，_get_status_color 内只引用常量名，
+        # 因此断言「常量名 + 模块级色值定义」两处，而非函数体内的裸色值。
+        for constant, color in (
+            ("PRIMARY", "#2563eb"),
+            ("SUCCESS", "#059669"),
+            ("ERROR", "#dc2626"),
+            ("TEXT_SUBTLE", "#9ca3af"),
         ):
-            self.assertIn(value, source)
+            self.assertIn(constant, status_color_source)
+            self.assertIn(f"{constant} = '{color}'", source)
+        # 不得回退到上一版深色主题的荧光色
+        for stale_color in ("#58a6ff", "#3fb950", "#f85149", "#6e7681"):
+            self.assertNotIn(stale_color, source)
+
+        # 状态复位必须使用可取消的 after，避免样式永久残留
+        self.assertIn("after_cancel", feedback_source)
+        self.assertIn("root.after(", feedback_source)
+
         self.assertIn("_show_status_feedback('Working'", draw_image_source)
         self.assertIn("_show_status_feedback('Success'", success_source)
         self.assertIn("_show_status_feedback('Error'", error_source)
         self.assertIn("_show_status_feedback('Ready'", clear_image_source)
         self.assertNotIn("_show_status_feedback('Success', \"就绪\")", clear_image_source)
-        self.assertIn("Progress.TLabel", source[source.index("Working.Progress.TLabel"):])
+
+        # 任务失效必须发生在视觉反馈之前
         self.assertLess(
             clear_image_source.index("_active_task_id = None"),
             clear_image_source.index("_show_status_feedback"),
@@ -158,12 +215,11 @@ class TestGUIThreading(unittest.TestCase):
         queued = []
         app._enqueue_ui_call = lambda callback, *args, **kwargs: queued.append((callback, args, kwargs))
 
-        with patch("himawari_ir_toolkit.himawari_gui._debug_report", lambda *a, **k: None):
-            with patch(
-                "himawari_ir_toolkit.himawari_gui.draw_ir_fulldisk",
-                return_value=("data/example.png", [[1]], (0, 1, 0, 1)),
-            ) as draw:
-                HimawariGUI._draw_worker(app, 1, "2025-07-24T06:00:00", "IR-CC", "F", "IR", "B14")
+        with patch(
+            "himawari_ir_toolkit.himawari_gui.draw_ir_fulldisk",
+            return_value=("data/example.png", [[1]], (0, 1, 0, 1)),
+        ) as draw:
+            HimawariGUI._draw_worker(app, 1, "2025-07-24T06:00:00", "IR-CC", "F", "IR", "B14")
 
         self.assertEqual(draw.call_args.kwargs["platform"], "Himawari-9")
         self.assertEqual(app.current_image_path, None)
@@ -201,6 +257,7 @@ class TestGUIThreading(unittest.TestCase):
     def test_draw_error_uses_copyable_error_dialog(self):
         app = object.__new__(HimawariGUI)
         app.progress_var = type("ProgressText", (), {"value": None, "set": lambda self, value: setattr(self, "value", value)})()
+        _attach_status_widgets(app)
         shown = []
         app._show_error_dialog = lambda title, message: shown.append((title, message))
 
@@ -240,6 +297,7 @@ class TestGUIThreading(unittest.TestCase):
         app.zoom_pending = False
         app.zoom_after_id = None
         app._active_task_id = 4
+        _attach_status_widgets(app)
         app._display_image = lambda *_args: self.fail("expired success must not display an image")
         shown = []
         app._show_error_dialog = lambda *args: shown.append(args)
@@ -284,6 +342,7 @@ class TestGUIThreading(unittest.TestCase):
         app.zoom_pending = False
         app.zoom_after_id = None
         app._active_task_id = 4
+        _attach_status_widgets(app)
 
         HimawariGUI._clear_image(app)
         HimawariGUI._set_draw_button_state(app, 4, "disabled")
@@ -388,6 +447,7 @@ class TestGUIThreading(unittest.TestCase):
         app.is_dragging = False
         app.zoom_pending = False
         app.zoom_after_id = None
+        _attach_status_widgets(app)
 
         HimawariGUI._clear_image(app)
 
@@ -465,6 +525,7 @@ class TestGUIThreading(unittest.TestCase):
         app.is_dragging = False
         app.zoom_pending = False
         app.zoom_after_id = None
+        _attach_status_widgets(app)
 
         HimawariGUI._clear_image(app)
 
@@ -504,7 +565,16 @@ class TestGUIPlatformSelection(unittest.TestCase):
             self.state = kwargs.get("state", self.state)
 
     class _Root:
+        def __init__(self):
+            self.after_calls = []
+
         def update(self):
+            pass
+
+        def after(self, delay, callback, *args):
+            self.after_calls.append((delay, callback, args))
+
+        def after_cancel(self, _after_id):
             pass
 
     def _platform_app(self, platform="Himawari-9", time="09:00:00"):
@@ -627,7 +697,7 @@ class TestGUIPlatformSelection(unittest.TestCase):
         self.assertEqual(app.time_var.get(), "09:00:00")
 
     def test_region_combo_is_created_readonly_and_remains_readonly_after_platform_change(self):
-        source = inspect.getsource(HimawariGUI._init_ui)
+        source = inspect.getsource(HimawariGUI._create_sidebar)
         self.assertIn("self.region_combo = ttk.Combobox", source)
         self.assertIn("state='readonly'", source[source.index("self.region_combo = ttk.Combobox"):])
 
@@ -644,6 +714,8 @@ class TestGUIPlatformSelection(unittest.TestCase):
         app.root = self._Root()
         app.draw_btn = self._Button()
         app.progress_var = self._Var()
+        app.status_var = self._Var()
+        app.progress_label = _FakeLabel()
         app._next_task_id = 0
         app._active_task_id = None
         app._show_error_dialog = lambda *_args: self.fail("valid GOES time must not show an error")
@@ -683,6 +755,46 @@ class TestGUIPlatformSelection(unittest.TestCase):
             shown,
             [("日期时间错误", "GOES 全圆盘仅提供每 10 分钟一个时次，请选择 00、10、20、30、40 或 50 分钟。")],
         )
+
+
+class TestGUIBuildsWithRealTk(unittest.TestCase):
+    """真实 Tk 冒烟：fake 替身无法暴露控件构造参数错误。
+
+    tk 经典控件不接受元组内边距（如 pady=(10, 6)），这类错误只会在建窗口时
+    抛 TclError，静态断言和替身测试都发现不了。无图形环境时自动跳过。
+    """
+
+    def test_gui_initializes_and_resets_with_real_widgets(self):
+        import tkinter as tk
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            raise unittest.SkipTest(f"无可用图形环境: {error}") from error
+
+        root.withdraw()
+        try:
+            app = HimawariGUI(root)
+            root.update_idletasks()
+            root.update()
+
+            app.platform_var.set("GOES-18")
+            app._on_platform_change(None)
+            root.update()
+            self.assertEqual(app.region_var.get(), "F (全圆盘)")
+            self.assertEqual(len(app.time_combo["values"]), 144)
+
+            app.platform_var.set("Himawari-9")
+            app._on_platform_change(None)
+            root.update()
+            self.assertEqual(len(app.time_combo["values"]), 24)
+
+            app._clear_image()
+            root.update()
+            self.assertEqual(app.status_var.get(), "●  就绪")
+            self.assertEqual(app.zoom_var.get(), "100%")
+        finally:
+            root.destroy()
 
 
 if __name__ == "__main__":
