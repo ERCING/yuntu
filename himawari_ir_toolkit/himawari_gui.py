@@ -6,6 +6,7 @@ Himawari-9 / GOES 卫星云图分析工具 GUI
 
 import sys
 import os
+import math
 import threading
 import datetime
 import queue
@@ -221,7 +222,7 @@ class HimawariGUI:
         self.original_img = None
         self.current_resized_img = None
         self.current_tk_image = None
-        # 缩放用的预览基准图（见 _pick_zoom_source），随原图一起释放
+        # 缩放用的预览基准图（见 _render_viewport），随原图一起释放
         self._preview_base = None
         self.zoom_scale = 1.0
         self.image_offset_x = 0
@@ -2138,6 +2139,10 @@ class HimawariGUI:
         # 更新缩放显示
         self.zoom_var.set(f"{int(self.zoom_scale * 100)}%")
         
+        # 换图后旧的渲染缓存必须失效，否则会跳过重绘、继续显示上一张
+        self._render_key = None
+        self.image_item_id = None
+
         # 绑定鼠标事件
         self._bind_mouse_events(tk_canvas)
         
@@ -2191,7 +2196,7 @@ class HimawariGUI:
         if self.zoom_after_id is not None:
             self.root.after_cancel(self.zoom_after_id)
 
-        # 单步重绘已从 302ms 降到约 15ms（见 _pick_zoom_source），
+        # 只渲染可见区后单步重绘约 3~5ms（见 _compute_viewport_box），
         # 50ms 的防抖反而让操作显得迟滞，收到 16ms 只用于合并连发事件。
         self.zoom_after_id = self.root.after(16, self._perform_zoom_redraw)
     
@@ -2228,59 +2233,97 @@ class HimawariGUI:
         self.zoom_after_id = None
         self._update_canvas_image(force_redraw=True)
     
-    def _pick_zoom_source(self, display_width, display_height):
-        """为本次缩放挑源图与重采样方式，返回 (source, resample)。
+    @staticmethod
+    def _compute_viewport_box(img_w, img_h, scale, offset_x, offset_y, canvas_w, canvas_h):
+        """把画布可见区域换算成源图的裁剪框。
 
-        缩放必须从**预览基准图**缩，而不是每次从全分辨率原图缩：
-        实测 5517×5500 的原图用 LANCZOS 缩到 634px 要 302ms，每滚一格卡一次；
-        从 1512px 的基准图缩只要 15ms，快 20 倍。
+        返回 (box, (out_w, out_h), (place_x, place_y))，图完全移出视口时返回 (None, None, None)。
 
-        但放大到超过基准图分辨率时必须换回原图，否则会从基准图二次放大、
-        截图变糊——那种场景用户就是想看真实像素，用 NEAREST 不插值。
+        为什么必须裁剪：放大后显示尺寸可能是画布的上百倍（zoom=2 时约 11000×11000），
+        把整幅图缩放一遍纯属浪费——原生看图器都只栅格化可见区域。
+        实测 5517×5500 原图：整幅缩放 zoom=0.9 要 332ms、zoom=2 要 1011ms；
+        只处理可见区则稳定在 3~4ms。
         """
+        if scale <= 0:
+            return None, None, None
+        src_x0 = max(0.0, -offset_x / scale)
+        src_y0 = max(0.0, -offset_y / scale)
+        src_x1 = min(float(img_w), (canvas_w - offset_x) / scale)
+        src_y1 = min(float(img_h), (canvas_h - offset_y) / scale)
+        if src_x1 - src_x0 < 1 or src_y1 - src_y0 < 1:
+            return None, None, None
+
+        box = (int(src_x0), int(src_y0),
+               min(int(math.ceil(src_x1)), img_w), min(int(math.ceil(src_y1)), img_h))
+        out_w = max(1, int(round((src_x1 - src_x0) * scale)))
+        out_h = max(1, int(round((src_y1 - src_y0) * scale)))
+        place_x = int(round(offset_x + src_x0 * scale))
+        place_y = int(round(offset_y + src_y0 * scale))
+        return box, (out_w, out_h), (place_x, place_y)
+
+    def _render_viewport(self, box, out_size, img_w, img_h):
+        """裁剪可见区并缩放，返回 PIL 图像。源图按所需分辨率选择，兼顾质量与速度。"""
         from PIL import Image
 
         base = getattr(self, '_preview_base', None)
-        if base is not None and display_width <= base.width and display_height <= base.height:
-            return base, Image.BILINEAR
-        return self.original_img, Image.NEAREST
+        box_w = box[2] - box[0]
+        box_h = box[3] - box[1]
+        if base is not None and box_w <= base.width and box_h <= base.height:
+            # 需要的源像素不超过基准图分辨率 → 从基准图取，快且质量足够
+            scale_x = base.width / img_w
+            scale_y = base.height / img_h
+            scaled_box = (
+                int(box[0] * scale_x), int(box[1] * scale_y),
+                max(int(box[0] * scale_x) + 1, int(round(box[2] * scale_x))),
+                max(int(box[1] * scale_y) + 1, int(round(box[3] * scale_y))),
+            )
+            return base.crop(scaled_box).resize(out_size, Image.BILINEAR)
+        # 放大看像素时从原图取，NEAREST 不做插值，保留真实像素
+        return self.original_img.crop(box).resize(out_size, Image.NEAREST)
 
     def _update_canvas_image(self, force_redraw=False):
-        """更新画布上的图片显示"""
-        from PIL import Image, ImageTk
-        
+        """更新画布上的图片显示：只渲染可见区域，并复用同一个画布 item。"""
+        from PIL import ImageTk
+
         if self.original_img is None:
             return
-        
+
         tk_canvas = self.canvas.get_tk_widget()
-        
-        img_width, img_height = self.original_img.size
-        display_width = int(img_width * self.zoom_scale)
-        display_height = int(img_height * self.zoom_scale)
-        
-        if force_redraw or \
-           self.current_tk_image is None or \
-           self.current_resized_img is None or \
-           self.current_resized_img.size != (display_width, display_height):
-            
-            if self.current_resized_img is not None:
-                self.current_resized_img.close()
-            source, resample = self._pick_zoom_source(display_width, display_height)
-            resized_img = source.resize((display_width, display_height), resample)
-            self.current_resized_img = resized_img
-            self.current_tk_image = ImageTk.PhotoImage(resized_img)
-            
+        canvas_w = max(tk_canvas.winfo_width(), 1)
+        canvas_h = max(tk_canvas.winfo_height(), 1)
+        img_w, img_h = self.original_img.size
+
+        box, out_size, place = self._compute_viewport_box(
+            img_w, img_h, self.zoom_scale,
+            self.image_offset_x, self.image_offset_y,
+            canvas_w, canvas_h,
+        )
+        if box is None:
+            return
+
+        # 只挪位置（拖动）时不必重新渲染
+        render_key = (box, out_size)
+        unchanged = (render_key == getattr(self, '_render_key', None)
+                     and self.current_tk_image is not None)
+        if unchanged and not force_redraw:
             if self.image_item_id is not None:
-                tk_canvas.delete(self.image_item_id)
-            
+                tk_canvas.coords(self.image_item_id, place[0], place[1])
+            return
+
+        resized = self._render_viewport(box, out_size, img_w, img_h)
+        if self.current_resized_img is not None:
+            self.current_resized_img.close()
+        self.current_resized_img = resized
+        self.current_tk_image = ImageTk.PhotoImage(resized)
+        self._render_key = render_key
+
+        # 复用已有 item：每帧 delete + create 会让 Tk 重建显示列表，是额外的固定开销
+        if self.image_item_id is None:
             self.image_item_id = tk_canvas.create_image(
-                self.image_offset_x, 
-                self.image_offset_y, 
-                anchor='nw', 
-                image=self.current_tk_image
-            )
+                place[0], place[1], anchor='nw', image=self.current_tk_image)
         else:
-            tk_canvas.coords(self.image_item_id, self.image_offset_x, self.image_offset_y)
+            tk_canvas.itemconfigure(self.image_item_id, image=self.current_tk_image)
+            tk_canvas.coords(self.image_item_id, place[0], place[1])
         
     def _clear_image(self):
         """清空图片"""
@@ -2299,6 +2342,15 @@ class HimawariGUI:
         if preview_base is not None:
             preview_base.close()
             self._preview_base = None
+        # 画布上的图片 item 必须显式删除：canvas.draw() 只重绘 matplotlib 自己的内容，
+        # 不会清掉我们 create_image 追加的 item，残留会一直浮在画面上。
+        if self.image_item_id is not None:
+            try:
+                self.canvas.get_tk_widget().delete(self.image_item_id)
+            except tk.TclError:
+                pass
+            self.image_item_id = None
+        self._render_key = None
         self.original_img = None
         self.current_resized_img = None
         self.current_tk_image = None

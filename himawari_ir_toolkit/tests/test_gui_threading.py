@@ -403,36 +403,47 @@ class TestGUIThreading(unittest.TestCase):
         # 超过 1 小时没有参考意义，不显示
         self.assertEqual(HimawariGUI._format_eta(app, 7200e6, 1e6), "")
 
-    def test_zoom_source_prefers_preview_base_and_falls_back_to_original(self):
-        """缩放要从预览基准图缩，否则每格都要重缩几千像素的原图。
+    def test_viewport_box_covers_whole_image_when_zoomed_out(self):
+        """缩小到整幅可见时，裁剪框应覆盖整张图，输出尺寸等于显示尺寸。"""
+        box, out_size, place = HimawariGUI._compute_viewport_box(
+            img_w=1000, img_h=800, scale=0.5,
+            offset_x=0, offset_y=0, canvas_w=800, canvas_h=600,
+        )
+        self.assertEqual(box, (0, 0, 1000, 800))
+        self.assertEqual(out_size, (500, 400))
+        self.assertEqual(place, (0, 0))
 
-        实测：5517×5500 原图用 LANCZOS 缩到 634px 单步 302ms（每滚一格卡一次）；
-        从 1408px 的基准图缩只要 15ms。放大超过基准图分辨率时必须换回原图，
-        否则是二次放大、像素糊掉。
+    def test_viewport_box_crops_to_visible_area_when_zoomed_in(self):
+        """放大后只应处理可见区域——这是丝滑与否的关键。
+
+        实测 5517×5500 原图：整幅缩放 zoom=0.9 要 332ms、zoom=2 要 1011ms；
+        只处理可见区稳定在 3~8ms。原生看图器就是这么做的。
         """
-        from PIL import Image
+        box, out_size, place = HimawariGUI._compute_viewport_box(
+            img_w=5517, img_h=5500, scale=4.0,
+            offset_x=0, offset_y=0, canvas_w=800, canvas_h=600,
+        )
+        # 4 倍放大时可见区只有 200×150 个源像素
+        self.assertLessEqual(box[2] - box[0], 201)
+        self.assertLessEqual(box[3] - box[1], 151)
+        # 输出尺寸受画布约束，不会随缩放级别暴涨
+        self.assertLessEqual(out_size[0], 800)
+        self.assertLessEqual(out_size[1], 600)
 
-        app = object.__new__(HimawariGUI)
-        app.original_img = Image.new('RGB', (5000, 4000))
-        app._preview_base = Image.new('RGB', (1200, 960))
+    def test_viewport_box_returns_none_when_image_out_of_view(self):
+        box, out_size, place = HimawariGUI._compute_viewport_box(
+            img_w=1000, img_h=800, scale=1.0,
+            offset_x=-5000, offset_y=-5000, canvas_w=800, canvas_h=600,
+        )
+        self.assertIsNone(box)
+        self.assertIsNone(out_size)
+        self.assertIsNone(place)
 
-        source, resample = HimawariGUI._pick_zoom_source(app, 600, 480)
-        self.assertIs(source, app._preview_base)
-        self.assertEqual(resample, Image.BILINEAR)
-
-        # 显示尺寸超过基准图 → 必须回到原图，并用 NEAREST 保留真实像素
-        source, resample = HimawariGUI._pick_zoom_source(app, 3000, 2400)
-        self.assertIs(source, app.original_img)
-        self.assertEqual(resample, Image.NEAREST)
-
-    def test_zoom_source_handles_missing_preview_base(self):
-        from PIL import Image
-
-        app = object.__new__(HimawariGUI)
-        app.original_img = Image.new('RGB', (100, 80))
-        source, resample = HimawariGUI._pick_zoom_source(app, 50, 40)
-        self.assertIs(source, app.original_img)
-        self.assertEqual(resample, Image.NEAREST)
+    def test_viewport_box_handles_zero_scale(self):
+        self.assertEqual(
+            HimawariGUI._compute_viewport_box(1000, 800, 0, 0, 0, 800, 600),
+            (None, None, None),
+        )
 
     def test_download_progress_updates_text_and_byte_progress_bar(self):
         app = object.__new__(HimawariGUI)
@@ -663,6 +674,10 @@ class TestGUIThreading(unittest.TestCase):
             def __init__(self, resized_image):
                 self.resized_image = resized_image
 
+            def crop(self, _box):
+                # 只渲染可见区后，绘制走 crop → resize；替身按需返回同一对象
+                return self
+
             def resize(self, _size, _resample):
                 return self.resized_image
 
@@ -670,8 +685,20 @@ class TestGUIThreading(unittest.TestCase):
             def get_tk_widget(self):
                 return self
 
+            def winfo_width(self):
+                return 100
+
+            def winfo_height(self):
+                return 100
+
             def create_image(self, *_args, **_kwargs):
                 return 1
+
+            def itemconfigure(self, *_args, **_kwargs):
+                pass
+
+            def coords(self, *_args, **_kwargs):
+                pass
 
         previous_image = _Image((100, 100))
         app = object.__new__(HimawariGUI)
