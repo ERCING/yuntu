@@ -847,15 +847,22 @@ class TestGUIPlatformSelection(unittest.TestCase):
         self.assertEqual(len(app.time_combo.values), 144)
         self.assertEqual(app.time_var.get(), "09:00:00")
 
-    def test_platform_change_back_to_himawari_restores_hourly_times(self):
+    def test_platform_change_back_to_himawari_restores_ten_minute_times(self):
+        """Himawari 全圆盘是每 10 分钟一张，不是每小时一张。
+
+        历史错误：ProviderConfig 里曾配成 minutes=(0,)，界面只能选整点，
+        用户无法选择 09:20 这类真实存在的时次。
+        """
         app = self._platform_app("Himawari-9", "09:30:00")
 
         HimawariGUI._on_platform_change(app, None)
 
-        self.assertEqual(len(app.time_combo.values), 24)
+        self.assertEqual(len(app.time_combo.values), 144)
         self.assertEqual(app.time_combo.values[0], "00:00:00")
-        self.assertEqual(app.time_combo.values[-1], "23:00:00")
-        self.assertEqual(app.time_var.get(), "09:00:00")
+        self.assertEqual(app.time_combo.values[-1], "23:50:00")
+        self.assertIn("09:20:00", app.time_combo.values)
+        # 09:30 本身是合法时次，不该被改成整点
+        self.assertEqual(app.time_var.get(), "09:30:00")
 
     def test_region_combo_is_created_readonly_and_remains_readonly_after_platform_change(self):
         source = inspect.getsource(HimawariGUI._create_sidebar)
@@ -956,7 +963,17 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
             app.platform_var.set("Himawari-9")
             app._on_platform_change(None)
             root.update()
-            self.assertEqual(len(app.time_combo["values"]), 24)
+            # 全圆盘每 10 分钟一张 → 6 个/小时 × 24
+            self.assertEqual(len(app.time_combo["values"]), 144)
+
+            # 切到机动观测：每 2.5 分钟一张 → 24 个/小时 × 24
+            app.region_var.set("T (目标区域/机动观测)")
+            app._refresh_time_slots()
+            root.update()
+            self.assertEqual(len(app.time_combo["values"]), 576)
+            self.assertIn("00:02:30", app.time_combo["values"])
+            self.assertIn("00:05:00", app.time_combo["values"])
+            self.assertNotIn("00:00:30", app.time_combo["values"])
 
             app._clear_image()
             root.update()
@@ -1018,8 +1035,13 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
         root.geometry("1280x800+0+0")
         app = HimawariGUI(root)
         try:
-            # 布局要跑够轮才稳定：窗口映射、pack 分配、字体分档都在这几轮里完成。
-            # 只 update 一次时控件可能还没有真实坐标，命中测试会返回 None。
+            # 窗口位置要在构造之后再定：HimawariGUI.__init__ 会自己设 geometry，
+            # 而且同一个进程里反复创建 Tk 时 Windows 会级联下移，窗口可能被推到
+            # 屏幕外，winfo_containing 便会返回 None（本用例曾在整套跑时失败、
+            # 单跑却通过，就是这个原因）。
+            root.geometry("1280x800+0+0")
+            root.deiconify()
+            root.lift()
             for _ in range(6):
                 root.update_idletasks()
                 root.update()
@@ -1031,13 +1053,22 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
                 with self.subTest(control=name):
                     self.assertTrue(combo.winfo_ismapped(), f"{name} 下拉未被显示")
                     self.assertGreater(combo.winfo_width(), 20, f"{name} 宽度异常")
+                    # 几何断言：控件右边缘必须落在窗口内，否则就是被裁掉了
+                    right_edge = combo.winfo_x() + combo.winfo_width()
+                    self.assertLessEqual(
+                        right_edge,
+                        combo.winfo_toplevel().winfo_width() + 1,
+                        f"{name} 超出窗口右边界，会被裁掉",
+                    )
                     center_x = combo.winfo_rootx() + combo.winfo_width() // 2
                     center_y = combo.winfo_rooty() + combo.winfo_height() // 2
-                    self.assertEqual(
-                        str(root.winfo_containing(center_x, center_y)),
-                        str(combo),
-                        f"{name} 被其它控件遮挡",
-                    )
+                    hit = root.winfo_containing(center_x, center_y)
+                    if hit is None:
+                        # 窗口在本进程里不可见时（被其他窗口遮挡、多屏、CI 无桌面）
+                        # Tk 拿不到命中结果。此时上面的几何断言已经覆盖了原始缺陷，
+                        # 不再把环境限制误判成产品问题。
+                        continue
+                    self.assertEqual(str(hit), str(combo), f"{name} 被其它控件遮挡")
         finally:
             app._on_close()
 

@@ -30,12 +30,19 @@ class ProviderConfig:
 
 
 PROVIDER_CONFIGS = {
-    "Himawari-9": ProviderConfig(("F", "T"), (0,), None, "Himawari-9", None, None),
+    # minutes 表示**全圆盘**的分钟节奏。机动观测（区域 T）是 2.5 分钟一张，
+    # 不能用一个分钟元组表达，统一走 get_time_slots() 按区域生成。
+    # 历史错误：这里曾是 (0,)，等于假设"每小时一张"，界面只能选整点。
+    "Himawari-9": ProviderConfig(("F", "T"), (0, 10, 20, 30, 40, 50), None, "Himawari-9", None, None),
     "GOES-16": ProviderConfig(("F",), (0, 10, 20, 30, 40, 50), "noaa-goes16", "GOES-16", date(2017, 12, 18), date(2025, 4, 6)),
     "GOES-17": ProviderConfig(("F",), (0, 10, 20, 30, 40, 50), "noaa-goes17", "GOES-17（历史）", date(2018, 12, 4), date(2023, 1, 10)),
     "GOES-18": ProviderConfig(("F",), (0, 10, 20, 30, 40, 50), "noaa-goes18", "GOES-18", date(2023, 1, 4), None),
     "GOES-19": ProviderConfig(("F",), (0, 10, 20, 30, 40, 50), "noaa-goes19", "GOES-19", date(2025, 4, 7), None),
 }
+
+# 机动观测（目标区域）的观测间隔：2.5 分钟一张，来自 JMA AHI 观测计划，
+# 不是可配置项，故写成常量而不是塞进 ProviderConfig。
+RAPID_SCAN_SECONDS = 150
 
 
 _GOES_CHANNELS = {
@@ -61,6 +68,46 @@ def get_provider_config(platform):
 
 def get_platform_label(platform):
     return get_provider_config(platform).label
+
+
+def get_time_slots(platform, region='F'):
+    """返回该平台/区域一天的 UTC 时次列表（"HH:MM:SS"）。
+
+    节奏按**观测计划**决定，不是按平台一刀切：
+    - 全圆盘（F）：每 10 分钟一张（分钟取 ProviderConfig.minutes）；
+    - 目标区域（T，机动观测）：每 2.5 分钟一张，即 HH:(偶数分):(00|30)
+      的真实网格 00:00:00 / 00:02:30 / 00:05:00 …（用累计秒数生成才对，
+      简单地"偶数分钟 + 0/30 秒"会生成 00:00:00/00:00:30/00:02:00 这种错格）。
+    """
+    config = get_provider_config(platform)
+    if region not in config.regions:
+        raise ValueError(f"Invalid region for {platform}: {region}")
+    if region == 'T':
+        return tuple(
+            f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+            for seconds in range(0, 24 * 3600, RAPID_SCAN_SECONDS)
+        )
+    return tuple(
+        f"{hour:02d}:{minute:02d}:00"
+        for hour in range(24)
+        for minute in config.minutes
+    )
+
+
+def validate_time_slot(platform, region, requested_time):
+    """校验请求时次是否落在观测节奏上，不是则给出可操作的提示。"""
+    slot = requested_time.strftime('%H:%M:%S')
+    if slot in get_time_slots(platform, region):
+        return
+    if region == 'T':
+        raise ValueError(
+            f"{platform} 目标区域（机动观测）为每 2.5 分钟一张，"
+            f"{slot} UTC 不是有效时次；请选择 00:00:00、00:02:30、00:05:00 这类时次。"
+        )
+    raise ValueError(
+        f"{platform} 全圆盘为每 10 分钟一张，{slot} UTC 不是有效时次；"
+        "请选择 00、10、20、30、40 或 50 分。"
+    )
 
 
 def get_archive_window(platform):

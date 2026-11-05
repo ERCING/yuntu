@@ -17,9 +17,11 @@ from himawari_ir_toolkit.satellite_providers import (
     get_platform_label,
     get_provider_config,
     get_source_channels,
+    get_time_slots,
     goes_cmipf_prefix,
     load_goes_scene,
     validate_archive_date,
+    validate_time_slot,
     select_goes_scan_object,
     scene_from_goes_datasets,
 )
@@ -119,6 +121,48 @@ class TestSystemProxyEnv(unittest.TestCase):
         self.assertIsNone(os.environ.get('HTTP_PROXY'))
 
 
+class TestTimeSlots(unittest.TestCase):
+    """观测节奏：全圆盘每 10 分钟、机动观测每 2.5 分钟。
+
+    历史错误：Himawari 的 minutes 曾配成 (0,)，等于假设"每小时一张"，
+    界面只能选整点，09:20 这类真实存在的时次根本选不到。
+    """
+
+    def test_full_disk_is_ten_minutes(self):
+        slots = get_time_slots("Himawari-9", "F")
+        self.assertEqual(len(slots), 144)          # 6 个/小时 × 24
+        self.assertEqual(slots[0], "00:00:00")
+        self.assertEqual(slots[1], "00:10:00")
+        self.assertEqual(slots[-1], "23:50:00")
+        self.assertIn("09:20:00", slots)
+
+    def test_rapid_scan_is_two_and_a_half_minutes(self):
+        slots = get_time_slots("Himawari-9", "T")
+        self.assertEqual(len(slots), 576)          # 24 个/小时 × 24
+        # 真实网格是 00:00:00 / 00:02:30 / 00:05:00 …
+        self.assertEqual(slots[:4], ("00:00:00", "00:02:30", "00:05:00", "00:07:30"))
+        self.assertEqual(slots[-1], "23:57:30")
+        # 易错点：不能用"偶数分钟 + 0/30 秒"生成，那会得到 00:00:30 这种错格
+        self.assertNotIn("00:00:30", slots)
+        self.assertNotIn("00:02:00", slots)
+
+    def test_goes_keeps_ten_minute_full_disk(self):
+        self.assertEqual(len(get_time_slots("GOES-18", "F")), 144)
+
+    def test_rejects_region_platform_does_not_support(self):
+        with self.assertRaisesRegex(ValueError, "Invalid region"):
+            get_time_slots("GOES-18", "T")
+
+    def test_validate_accepts_on_grid_and_rejects_off_grid(self):
+        validate_time_slot("Himawari-9", "F", datetime(2026, 8, 7, 9, 20, 0))
+        with self.assertRaisesRegex(ValueError, "每 10 分钟"):
+            validate_time_slot("Himawari-9", "F", datetime(2026, 8, 7, 9, 25, 0))
+
+        validate_time_slot("Himawari-9", "T", datetime(2026, 8, 7, 9, 2, 30))
+        with self.assertRaisesRegex(ValueError, "每 2.5 分钟"):
+            validate_time_slot("Himawari-9", "T", datetime(2026, 8, 7, 9, 5, 10))
+
+
 class TestProviderConfig(unittest.TestCase):
     def test_provider_configs_include_exact_identifiers_labels_and_archive_boundaries(self):
         goes_minutes = (0, 10, 20, 30, 40, 50)
@@ -141,7 +185,9 @@ class TestProviderConfig(unittest.TestCase):
 
         himawari = PROVIDER_CONFIGS["Himawari-9"]
         self.assertEqual(himawari.regions, ("F", "T"))
-        self.assertEqual(himawari.minutes, (0,))
+        # 全圆盘是每 10 分钟一张。这里曾断言 (0,)，等于把"每小时一张"锁成契约，
+        # 结果界面只能选整点、09:20 这类真实时次选不到。
+        self.assertEqual(himawari.minutes, (0, 10, 20, 30, 40, 50))
         self.assertIsNone(himawari.bucket)
         self.assertEqual(himawari.label, "Himawari-9")
         self.assertIsNone(himawari.archive_start)

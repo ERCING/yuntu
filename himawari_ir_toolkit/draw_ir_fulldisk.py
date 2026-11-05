@@ -87,6 +87,7 @@ if __package__:
     from .mycolor import color_map, my_color_map
     from .satellite_providers import (
         PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+            validate_time_slot,
     )
 else:
     PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,12 +97,14 @@ else:
         from himawari_ir_toolkit.mycolor import color_map, my_color_map
         from himawari_ir_toolkit.satellite_providers import (
             PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+            validate_time_slot,
         )
     except ImportError:
         # 冻结环境（以及"脚本与模块同目录"的直接运行方式）：模块以顶层名存在
         from mycolor import color_map, my_color_map
         from satellite_providers import (
             PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+            validate_time_slot,
         )
 
 # ============================================================
@@ -675,6 +678,15 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
         )
 
     from pycontrails.datalib.himawari import Himawari
+
+    # Himawari 侧此前完全没有时次校验，错时次会一路走到下载才失败（白等几十秒）。
+    # 节奏：全圆盘每 10 分钟、机动观测每 2.5 分钟。
+    try:
+        requested_time = datetime.fromisoformat(time_str)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid time_str: {time_str!r}; expected ISO-8601 UTC time") from error
+    validate_time_slot(platform, region, requested_time)
+
     is_bt = dtype_config['is_brightness_temp']
     band_desc = dtype_config['band_descriptions'][band]
     region_desc = {"FLDK": "全圆盘", "Japan": "日本区域", "Target": "目标区域"}[region_full]

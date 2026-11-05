@@ -22,7 +22,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draw_ir_fulldisk import draw_ir_fulldisk, DATA_TYPES
 from mycolor import my_color_map
-from satellite_providers import get_archive_window, get_provider_config
+from satellite_providers import (
+    get_archive_window,
+    get_provider_config,
+    get_time_slots,
+    validate_time_slot,
+)
 
 
 PLATFORM_OPTIONS = ('Himawari-9', 'GOES-16', 'GOES-17（历史）', 'GOES-18', 'GOES-19')
@@ -1049,6 +1054,8 @@ class HimawariGUI:
                                          state='readonly', style='Dark.TCombobox')
         self.region_combo.pack(fill=tk.X)
         self.region_combo['values'] = ('F (全圆盘)', 'T (目标区域/机动观测)')
+        # 区域切换会改变观测节奏（全圆盘 10 分钟 / 机动观测 2.5 分钟），必须重建时次列表
+        self.region_combo.bind('<<ComboboxSelected>>', lambda _event: self._refresh_time_slots())
         self.region_var.set('F (全圆盘)')
         
         # === 数据与显示 ===
@@ -1571,23 +1578,35 @@ class HimawariGUI:
                 self.day_var.set(f'{bounded_date.day:02d}')
                 self._update_days()
 
-        hour, minute = (int(value) for value in self.time_var.get().split(':', 2)[:2])
-        time_values = getattr(self.time_combo, 'values', ())
-        if config.minutes == (0,):
-            time_values = tuple(f"{value:02d}:00:00" for value in range(24))
-            self.time_combo['values'] = time_values
-            self.time_var.set(f"{hour:02d}:00:00")
-        else:
-            time_values = tuple(
-                f"{value_hour:02d}:{value_minute:02d}:00"
-                for value_hour in range(24)
-                for value_minute in config.minutes
-            )
-            self.time_combo['values'] = time_values
-            selected_minute = minute if minute in config.minutes else config.minutes[0]
-            self.time_var.set(f"{hour:02d}:{selected_minute:02d}:00")
+        self._refresh_time_slots()
         self.data_type_var.set('IR (红外窗区)')
         self._on_type_change(None)
+
+    def _refresh_time_slots(self):
+        """按当前平台与区域重建时次列表，并尽量保留已选时次。
+
+        节奏随**区域**变化而不是随平台：全圆盘每 10 分钟、机动观测每 2.5 分钟。
+        原先这里按 `config.minutes == (0,)` 分支只给整点，等于假设"每小时一张"。
+        """
+        platform = _platform_identifier(self.platform_var.get())
+        region_display = self.region_var.get()
+        region = 'F' if region_display.startswith('F') else 'T'
+        try:
+            slots = get_time_slots(platform, region)
+        except ValueError:
+            return
+
+        current = self.time_var.get()
+        self.time_combo['values'] = slots
+        if current in slots:
+            return
+        # 尽量保留小时，落到该小时内的第一个合法时次
+        try:
+            hour = int(current.split(':', 1)[0])
+        except (ValueError, IndexError):
+            hour = 9
+        fallback = next((slot for slot in slots if slot.startswith(f"{hour:02d}:")), slots[0])
+        self.time_var.set(fallback)
 
     def _on_type_change(self, event):
         """数据类型改变时更新波段和色阶列表"""
@@ -1634,6 +1653,14 @@ class HimawariGUI:
                 "日期时间错误",
                 "GOES 全圆盘仅提供每 10 分钟一个时次，请选择 00、10、20、30、40 或 50 分钟。",
             )
+            return
+
+        # 时次节奏校验：全圆盘 10 分钟、机动观测 2.5 分钟。
+        # 放在提交前，避免参数不对还白等一次下载。
+        try:
+            validate_time_slot(platform, region, datetime.datetime.strptime(full_time, '%Y-%m-%dT%H:%M:%S'))
+        except ValueError as error:
+            self._show_error_dialog("日期时间错误", str(error))
             return
 
         # 色阶范围与反转在提交前先校验，避免白等一次下载才发现参数非法
