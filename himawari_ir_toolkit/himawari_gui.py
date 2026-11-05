@@ -958,8 +958,12 @@ class HimawariGUI:
         # 改用带 tzinfo 的 now(timezone.utc)，避免与后续 UTC 时间换算混淆。
         today = datetime.datetime.now(datetime.timezone.utc)
         year_list = [str(y) for y in range(2015, today.year + 1)]
+        # 必须显式给 width：ttk.Combobox 默认按 20 个字符索要约 175px，
+        # 年月日三个并排就是 525px，而侧栏可用宽度只有约 255px。pack 不会把控件
+        # 压到请求宽度以下，结果最后打包的「日」被挤出可视区、winfo_ismapped()=0，
+        # 用户根本点不到它（表现为"选不了日期"）。改小自然宽度后由 expand 均分剩余空间。
         self.year_combo = ttk.Combobox(year_frame, textvariable=self.year_var,
-                                        values=year_list,
+                                        values=year_list, width=6,
                                         state='readonly', style='Dark.TCombobox')
         self.year_combo.pack(fill=tk.X)
         self.year_var.set(str(today.year))
@@ -972,7 +976,7 @@ class HimawariGUI:
         self.month_var = tk.StringVar()
         month_list = [f"{m:02d}" for m in range(1, 13)]
         self.month_combo = ttk.Combobox(month_frame, textvariable=self.month_var,
-                                         values=month_list,
+                                         values=month_list, width=3,
                                          state='readonly', style='Dark.TCombobox')
         self.month_combo.pack(fill=tk.X)
         self.month_var.set(f"{today.month:02d}")
@@ -984,7 +988,8 @@ class HimawariGUI:
         day_frame.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
         self.day_var = tk.StringVar()
         self.day_combo = ttk.Combobox(day_frame, textvariable=self.day_var,
-                                       state='readonly', style='Dark.TCombobox')
+                                       width=3, state='readonly',
+                                       style='Dark.TCombobox')
         self.day_combo.pack(fill=tk.X)
         self._update_days()
 

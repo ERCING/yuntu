@@ -922,6 +922,47 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
         with self.assertRaises(tk.TclError):
             root.winfo_exists()
 
+    def test_date_controls_are_all_mapped_and_clickable(self):
+        """年月日三个下拉必须都真实可见、且点击命中的就是它自己。
+
+        历史缺陷：ttk.Combobox 默认按 20 字符索要宽度（约 175px），三个并排需要
+        约 525px，而侧栏可用宽度只有约 255px。`pack` 不会把控件压到请求宽度以下，
+        于是最后打包的「日」被挤出可视区（winfo_ismapped() 为 0），用户点不到，
+        表现为"选不了日期"。
+
+        替身测试和源码断言都发现不了这类问题：控件构造完全正确，是布局把它裁掉了，
+        只有真建窗口、真做命中测试才能暴露。
+        """
+        import tkinter as tk
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            raise unittest.SkipTest(f"无可用图形环境: {error}") from error
+
+        root.geometry("1280x800")
+        app = HimawariGUI(root)
+        try:
+            root.update_idletasks()
+            root.update()
+            for name, combo in (
+                ("year", app.year_combo),
+                ("month", app.month_combo),
+                ("day", app.day_combo),
+            ):
+                with self.subTest(control=name):
+                    self.assertTrue(combo.winfo_ismapped(), f"{name} 下拉未被显示")
+                    self.assertGreater(combo.winfo_width(), 20, f"{name} 宽度异常")
+                    center_x = combo.winfo_rootx() + combo.winfo_width() // 2
+                    center_y = combo.winfo_rooty() + combo.winfo_height() // 2
+                    self.assertEqual(
+                        str(root.winfo_containing(center_x, center_y)),
+                        str(combo),
+                        f"{name} 被其它控件遮挡",
+                    )
+        finally:
+            app._on_close()
+
 
 if __name__ == "__main__":
     unittest.main()
