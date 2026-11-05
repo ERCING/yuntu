@@ -578,6 +578,67 @@ class TestDownloadProgress(unittest.TestCase):
         self.assertEqual(events[-1], (10, 10, 2, 2))
         self.assertEqual([event[0] for event in events], sorted(event[0] for event in events))
 
+    def test_streamed_download_reports_progress_per_chunk(self):
+        """进度必须按块推进，而不是等整个文件读完才报一次。
+
+        单个 GOES 全圆盘文件约 23MB，跨境链路下 80 秒以上；若只在文件结束时
+        回调，这 80 秒进度条一格不动，用户会以为程序卡死。
+        """
+        events = []
+
+        _download_s3_files_with_progress(
+            _FakeS3(),
+            ["first"],
+            lambda downloaded_bytes, *_: events.append(downloaded_bytes),
+            chunk_size=1,
+            announce_start=False,
+        )
+
+        # 4 字节的文件、逐字节读 → 应看到 1、2、3、4 四次中间进度
+        self.assertIn(1, events, "未按块上报进度")
+        self.assertIn(2, events)
+        self.assertIn(3, events)
+        self.assertEqual(events[-1], 4)
+
+    def test_streamed_download_progress_never_goes_backwards_on_retry(self):
+        """重试会从头再读一遍，上报值不得倒退，否则进度条往回跳。"""
+
+        class _FlakyReader(_FakeReader):
+            """第一次读到一半抛错（模拟连接中断），第二次正常读完。"""
+
+            def __init__(self, payload):
+                super().__init__(payload)
+                self.calls = 0
+
+            def read(self, size=-1):
+                if _FlakyReader.shared_attempt == 1 and self.tell() >= 2:
+                    raise ConnectionError("simulated reset")
+                return super().read(size)
+
+        _FlakyReader.shared_attempt = 1
+        events = []
+
+        class _Fs:
+            def __init__(self):
+                self.opened = 0
+
+            def info(self, path):
+                return {"size": 4}
+
+            def open(self, path, mode):
+                self.opened += 1
+                _FlakyReader.shared_attempt = self.opened
+                return _FlakyReader(b"abcd")
+
+        downloaded = _download_s3_files_with_progress(
+            _Fs(), ["first"], lambda d, *_: events.append(d),
+            chunk_size=1, announce_start=False,
+        )
+
+        self.assertEqual(downloaded, [b"abcd"])
+        self.assertEqual(events, sorted(events), f"进度出现倒退：{events}")
+        self.assertGreater(max(events), 0)
+
     def test_streamed_download_rejects_silent_short_reads_after_three_attempts(self):
         class ShortReadS3(_FakeS3):
             def __init__(self):

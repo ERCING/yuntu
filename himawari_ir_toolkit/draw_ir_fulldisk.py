@@ -187,15 +187,32 @@ def _download_s3_files_with_progress(
     for file_index, path in enumerate(paths, start=1):
         expected_size = int(fs.info(path)["size"])
         content = b""  # 预置为空，杜绝重试全失败时的 UnboundLocalError
+        # 高水位：重试会从头再读一遍，若直接用本轮已读字节数上报，进度会倒退，
+        # 进度条会往回跳。这里记本文件已上报过的最大值，保证单调不减。
+        reported_this_file = 0
         for attempt in range(3):
             chunks = []
             try:
+                bytes_this_file = 0
                 with fs.open(path, "rb") as remote_file:
                     while True:
                         chunk = remote_file.read(chunk_size)
                         if not chunk:
                             break
                         chunks.append(chunk)
+                        bytes_this_file += len(chunk)
+                        if bytes_this_file > reported_this_file:
+                            reported_this_file = bytes_this_file
+                            # 按块上报，而不是等整个文件读完才报一次。
+                            # 单个 GOES 全圆盘文件约 23MB，跨境链路下可能要 80 秒以上；
+                            # 若只在文件结束时回调，这 80 秒里进度条一格不动，用户会
+                            # 以为程序卡死。这里按 1MB 粒度推进，代价可忽略。
+                            progress_callback(
+                                downloaded_bytes + reported_this_file,
+                                total_bytes,
+                                file_offset + file_index - 1,
+                                file_count,
+                            )
                 content = b"".join(chunks)
                 if len(content) != expected_size:
                     # 传输截断：属于可重试错误，交给下一轮 attempt

@@ -1,13 +1,17 @@
 from dataclasses import FrozenInstanceError, fields
 from datetime import date, datetime
 import inspect
+import os
+import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
 from himawari_ir_toolkit.satellite_scene import ProjectionMetadata, Scene
 from himawari_ir_toolkit.satellite_providers import (
     PROVIDER_CONFIGS,
+    _apply_system_proxy_env,
     _parse_goes_scan_object,
     get_archive_window,
     get_platform_label,
@@ -19,6 +23,100 @@ from himawari_ir_toolkit.satellite_providers import (
     select_goes_scan_object,
     scene_from_goes_datasets,
 )
+
+
+class TestSystemProxyEnv(unittest.TestCase):
+    """系统代理必须能传给 s3fs/botocore。
+
+    botocore 与 s3fs 只读 HTTP_PROXY/HTTPS_PROXY 环境变量，完全不看 Windows
+    「Internet 选项」里的系统代理。实测：同一台机器走代理 3.78 MB/s，
+    不走代理只有 0.17 MB/s（差 20 倍以上），所以这一步是"挂了代理还是慢"
+    的直接原因。
+    """
+
+    PROXY_VARS = ('HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
+                  'http_proxy', 'https_proxy')
+
+    def setUp(self):
+        self._saved = {name: os.environ.get(name) for name in
+                       self.PROXY_VARS + ('HIMAWARI_NO_SYSTEM_PROXY',)}
+        for name in self.PROXY_VARS:
+            os.environ.pop(name, None)
+        os.environ.pop('HIMAWARI_NO_SYSTEM_PROXY', None)
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _fake_registry(self, enabled, server):
+        """伪造 winreg：OpenKey 支持 with 语法，QueryValueEx 按名返回。
+
+        注意 QueryValueEx 真实签名返回 (值, 类型) 二元组，替身必须照做，
+        否则被测代码解包时会 TypeError。
+        """
+        def query(_key, name):
+            return {
+                'ProxyEnable': (enabled, 4),
+                'ProxyServer': (server, 1),
+            }[name]
+
+        handle = MagicMock()
+        handle.__enter__ = MagicMock(return_value=handle)
+        handle.__exit__ = MagicMock(return_value=False)
+        return patch('winreg.OpenKey', return_value=handle), \
+            patch('winreg.QueryValueEx', side_effect=query)
+
+    def test_reads_windows_system_proxy_when_env_is_empty(self):
+        open_key, query = self._fake_registry(1, '127.0.0.1:7890')
+        with open_key, query:
+            _apply_system_proxy_env()
+
+        self.assertEqual(os.environ.get('HTTP_PROXY'), 'http://127.0.0.1:7890')
+        self.assertEqual(os.environ.get('HTTPS_PROXY'), 'http://127.0.0.1:7890')
+        # 内网必须绕过代理，否则本地服务会被代理掉
+        self.assertIn('127.0.0.1', os.environ.get('NO_PROXY', ''))
+
+    def test_parses_per_protocol_proxy_server_format(self):
+        open_key, query = self._fake_registry(
+            1, 'http=10.0.0.5:8080;https=10.0.0.5:8443')
+        with open_key, query:
+            _apply_system_proxy_env()
+
+        self.assertEqual(os.environ.get('HTTP_PROXY'), 'http://10.0.0.5:8080')
+
+    def test_respects_existing_env_and_never_overrides(self):
+        os.environ['HTTPS_PROXY'] = 'http://my-proxy:1080'
+        open_key, query = self._fake_registry(1, '127.0.0.1:7890')
+        with open_key, query:
+            _apply_system_proxy_env()
+
+        self.assertEqual(os.environ.get('HTTPS_PROXY'), 'http://my-proxy:1080')
+        self.assertIsNone(os.environ.get('HTTP_PROXY'))
+
+    def test_disabled_proxy_is_ignored(self):
+        open_key, query = self._fake_registry(0, '127.0.0.1:7890')
+        with open_key, query:
+            _apply_system_proxy_env()
+
+        self.assertIsNone(os.environ.get('HTTP_PROXY'))
+
+    def test_opt_out_switch_is_honoured(self):
+        os.environ['HIMAWARI_NO_SYSTEM_PROXY'] = '1'
+        open_key, query = self._fake_registry(1, '127.0.0.1:7890')
+        with open_key, query:
+            _apply_system_proxy_env()
+
+        self.assertIsNone(os.environ.get('HTTP_PROXY'))
+
+    def test_registry_errors_are_swallowed(self):
+        """读注册表失败绝不能让程序起不来。"""
+        with patch('winreg.OpenKey', side_effect=OSError('denied')):
+            _apply_system_proxy_env()  # 不抛即通过
+
+        self.assertIsNone(os.environ.get('HTTP_PROXY'))
 
 
 class TestProviderConfig(unittest.TestCase):

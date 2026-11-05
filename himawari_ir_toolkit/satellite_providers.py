@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime
+import os
 import re
 import sys
 
@@ -212,6 +213,88 @@ def goes_cmipf_prefix(platform, requested_time):
     return f"{config.bucket}/ABI-L2-CMIPF/{requested_time:%Y}/{day_of_year:03d}/{requested_time:%H}/"
 
 
+def _apply_system_proxy_env():
+    """把 Windows 系统代理同步到环境变量，让 s3fs/botocore 真正用上它。
+
+    背景：botocore 与 s3fs 只读 HTTP_PROXY / HTTPS_PROXY 环境变量，**完全不看
+    Windows「Internet 选项」里的系统代理**。国内用户通常只开系统代理（Clash 之类
+    的 127.0.0.1:7890），于是程序绕过代理直连 S3，速度可能差一个数量级，而用户
+    会以为"挂了代理还是慢"。
+
+    规则：
+    - 已有任一代理环境变量则完全不动（尊重用户显式配置）；
+    - 只在 ProxyEnable=1 且能解析出主机端口时才写入；
+    - 设置 HIMAWARI_NO_SYSTEM_PROXY=1 可彻底关掉这个行为；
+    - 非 Windows 或读取失败一律静默跳过，绝不影响主流程。
+    """
+    if os.environ.get('HIMAWARI_NO_SYSTEM_PROXY'):
+        return
+    for name in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy'):
+        if os.environ.get(name):
+            return
+    if sys.platform != 'win32':
+        return
+    try:
+        import winreg
+        key_path = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            enabled, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+            if not enabled:
+                return
+            server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+    except (ImportError, OSError, ValueError):
+        return
+    if not server:
+        return
+    # ProxyServer 可能是 "host:port"，也可能是按协议分列的
+    # "http=host:port;https=host:port"，两种都要处理。
+    candidate = server
+    if '=' in server:
+        for part in server.split(';'):
+            if part.lower().startswith('http='):
+                candidate = part.split('=', 1)[1]
+                break
+        else:
+            return
+    candidate = candidate.strip()
+    if not candidate or ':' not in candidate:
+        return
+    proxy_url = f'http://{candidate}'
+    os.environ['HTTP_PROXY'] = proxy_url
+    os.environ['HTTPS_PROXY'] = proxy_url
+    # 代理只覆盖外网：本机与内网直连，否则会把自己的本地服务也代理掉
+    os.environ.setdefault(
+        'NO_PROXY',
+        'localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,'
+        '172.16.0.0/12,192.168.0.0/16',
+    )
+
+
+_apply_system_proxy_env()
+
+
+def _open_s3_filesystem():
+    """创建匿名 S3 文件系统，并设上超时。
+
+    没有超时的话，连接一旦卡住就是无限等待——用户看到的是"界面死了"，
+    实际是 aiohttp/botocore 在无声地挂着。这里给连接与读取都加上限，
+    让卡死变成一条可读的错误。
+
+    注意：s3fs 在本模块是**惰性导入**的可选依赖（见 load_goes_scene 的
+    missing 检查），所以这里不能引用模块级的 s3fs，必须就地导入。
+    """
+    import s3fs
+
+    return s3fs.S3FileSystem(
+        anon=True,
+        config_kwargs={
+            'connect_timeout': 15,
+            'read_timeout': 60,
+            'retries': {'max_attempts': 2, 'mode': 'standard'},
+        },
+    )
+
+
 def load_goes_scene(platform, requested_time, data_type, band, *, fs=None, open_dataset=None):
     config = get_provider_config(platform)
     validate_archive_date(platform, requested_time)
@@ -238,7 +321,7 @@ def load_goes_scene(platform, requested_time, data_type, band, *, fs=None, open_
     if missing:
         raise ValueError(f"Missing optional GOES loader package(s): {', '.join(missing)}")
     if fs is None:
-        fs = s3fs.S3FileSystem(anon=True)
+        fs = _open_s3_filesystem()
     if open_dataset is None:
         open_dataset = xr.open_dataset
 
