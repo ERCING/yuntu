@@ -7,7 +7,7 @@
 
 ---
 
-## 一、已完成（三个提交）
+## 一、已完成（提交系列）
 
 ### `f970904` — 修复 UI 队列假死、深色主题泄漏、装饰字号区域特例
 
@@ -38,6 +38,33 @@
 
 其中"已知限制"一节如实列出了尚未接线或未实现的项（右侧图层栏、经纬网、配置持久化、无取消机制），避免使用者按 README 操作后发现功能不存在。
 
+### `e1fc37d` — 修复打包后启动即崩（冻结环境导入失败）
+
+**这是本轮最有价值的发现：打包一直是坏的，而且被测试保护着。**
+
+- 现象：PyInstaller 产物一启动就弹 `Unhandled exception in script`，
+  stderr 为 `ModuleNotFoundError: No module named 'himawari_ir_toolkit'`。
+- 根因：冻结后所有模块都是**顶层模块**，包名 `himawari_ir_toolkit` 不存在，
+  但两处非包模式导入仍用包名限定形式（`draw_ir_fulldisk.py` 脚本分支、
+  `satellite_providers.py` 无条件导入）。
+- 为什么长期没发现：`test_download_progress.py` 里有
+  `assertNotIn("mycolor", imported_modules)`，把"只允许包名限定导入、
+  禁止顶层名兜底"锁成了契约。**测试保护了 bug，而不是行为。**
+- 改法：两处统一为"包名优先、顶层名兜底"的三形态解析（包内 / 脚本 / 冻结）。
+- 验证：新增"模拟冻结"自检（拦截 `himawari_ir_toolkit.*` 使其不可导入）通过；
+  重新打包后实际启动产物，窗口标题为 `Satellite IR Toolkit · 卫星云图分析`，
+  进程稳定存活、stderr 无异常。
+
+### 构建产物整理
+
+- 删除 5 套过期 PyInstaller 构建树（`goes-*`、`pyinstaller`），**回收约 849 MB**：
+  `build/` 从 1128 MB → 364 MB（dist 279 + work 86）。
+- 重新打包并与源码同步：`build/dist/HimawariIRToolkit`（onedir）。
+- `release/HimawariIRToolkit/` 原本**只有一个 `_internal`、没有 exe**（发给同事也打不开），
+  已替换为完整可运行产物（exe 25.8 MB + `_internal`，共 279 MB），并实测启动通过。
+
+> 打包命令：`.venv\Scripts\pyinstaller.exe HimawariIRToolkit.spec --distpath build\dist --workpath build\work --noconfirm`（约 96 秒）。
+
 ---
 
 ## 二、验证状态
@@ -48,6 +75,8 @@
 | 真实 Tk 冒烟（独立脚本，模拟点右上角关闭） | 退出码 `0`，`mainloop` 正常返回，stderr 干净；修复前为 mainloop 不返回 + 进程残留 + bgerror |
 | CLI `--list` | 正常（退出码 0） |
 | 五模块 import | 全部通过 |
+| **打包产物启动** | `release/HimawariIRToolkit/HimawariIRToolkit.exe` 实测：窗口标题正确、进程稳定存活 14~15s、stderr 无异常 |
+| **冻结环境导入** | "模拟冻结"自检通过（拦截 `himawari_ir_toolkit.*` 后仍可导入） |
 
 **测试环境事实（重要，别再踩）**
 - `.venv` 里**没有 pytest**，测试是 `unittest` 风格。用：
@@ -72,24 +101,34 @@
 **P1**
 3. 无任何配置持久化：每次重启回到全默认（日期=今天、09:00、Himawari-9）。
 4. 引擎无取消机制：关窗时正在下载，`data/` 可能残留写了一半的 PNG（本轮只做到"不静默中断 + 给确认"）。
-5. 打包与源码脱节：`build/dist` 的 exe 是 2026-10-25 的，落后于源码；`release/HimawariIRToolkit` 只有一个 `_internal` 目录、**没有 exe**；`build/` 堆了 7 套 PyInstaller 树共约 1.1 GB。
-6. 测试里有大量源码字符串/AST 断言，锁定实现细节而非行为；本轮已把其中两处升级为更强契约，其余仍在。
+5. ~~打包与源码脱节~~ **已解决**：产物已重建并与源码同步，`release/` 已是完整可运行包。
+   遗留小项：`release/` 不在 git 里（`.gitignore` 忽略），分发需另行传递；每次改源码后必须重新打包才会生效。
+6. 测试里有大量源码字符串/AST 断言，锁定实现细节而非行为；本轮已升级其中三处
+   （主题令牌、状态色、冻结导入双分支），其余仍在。**注意**：本轮打包事故正是这类断言造成的，
+   改动相关代码前先确认断言是否把错误契约固化成了"必须"。
+7. **打包后缓存目录可能不可写**（本轮新发现，未修）：`draw_ir_fulldisk.py` 在**导入时**就
+   `os.makedirs(pycontrails_cache)`，冻结后路径落在 `_internal/` 下。若把程序装到
+   `C:\Program Files\` 这类只读位置，会在导入阶段直接抛 `OSError`。
+   修法：`try/except OSError` 回落到 `%LOCALAPPDATA%` 或 `tempfile.gettempdir()`。
+   当前 `E:\ai\fldk` 可写，所以本轮验证没暴露它。
 
 **P2**
-7. 文档三套色板互相冲突（`docs/superpowers/*` 与 `.design/*`），`.design` 的三栏 Web 工作台与"不得新增控件"的 spec 结构性对立。
-8. 无 README / LICENSE / 架构文档 / 安装说明 / CLI 参考；`himawari_ir_toolkit/` 没有 `__init__.py`（靠命名空间包工作）；根目录 `tests/` 只剩一个孤儿 `.pyc`。
-9. 两份 `debug-*.md` 仍未闭环；`ttk-button-contrast` 的埋点日志是 0 字节。
-10. `get_decoration_layout_metrics` 的 `cbar_width` 仍保留 `max(0.018, ...)` 下限，对 5500px 宽图实际约 99px，与 18px 像素预算不符（本轮按要求**未动**）。
+8. 文档三套色板互相冲突（`docs/superpowers/*` 与 `.design/*`），`.design` 的三栏 Web 工作台与"不得新增控件"的 spec 结构性对立。
+9. ~~无 README / 安装说明 / CLI 参考~~ **已解决**（新增根目录 `README.md`）。
+   遗留：无 LICENSE / 架构文档；`himawari_ir_toolkit/` 没有 `__init__.py`（靠命名空间包工作）；根目录 `tests/` 只剩一个孤儿 `.pyc`。
+10. 两份 `debug-*.md` 仍未闭环；`ttk-button-contrast` 的埋点日志是 0 字节。
+11. `get_decoration_layout_metrics` 的 `cbar_width` 仍保留 `max(0.018, ...)` 下限，对 5500px 宽图实际约 99px，与 18px 像素预算不符（本轮按要求**未动**）。
 
 ---
 
-## 四、下一步候选（用户尚未选定）
+## 四、下一步候选
 
-按用户"一步一步确认"的节奏，中断时待选的是这三项：
+工程化那一项已基本完成（README + 清理 + 重新打包 + 修好 release）。剩下待选：
 
 1. **先看界面再定控件去留** —— 用户按 `start_gui.bat` 实际跑一遍，确认右侧哪些控件值得接线、哪些直接删。
 2. **直接接线/删控件** —— 能接引擎的接（色阶、vmin/vmax、反转），接不了又没价值的删（等值线、图层、队列卡片）。工作量大，适合拆并行子代理。
-3. **工程化** —— 补 README + 清 `build/` 旧构建 + 重新打包 + 确认 `release/` 完整。面向"分享给团队"这个既定目标。
+3. **经纬网接线 + 配置持久化** —— 把已实现却没接的经纬网接进渲染路径；给 GUI 加参数记忆。
+4. **打包健壮性收尾** —— 上述 P1 第 7 项（只读安装位置的缓存目录回落）。
 
 ---
 

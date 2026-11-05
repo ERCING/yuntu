@@ -171,6 +171,14 @@ GOES 各卫星的可用归档窗口（超出范围会在发起网络请求前直
 
 `.spec` 里对 `pycontrails` 做了全量收集——它在 `draw_ir_fulldisk` 中为函数内惰性导入，静态分析扫不到，漏收会导致打包后 Himawari 功能失效。
 
+> **改动模块间导入语句前请先读这条**：冻结后所有模块都变成**顶层模块**，包名
+> `himawari_ir_toolkit` 在包里并不存在。因此 `draw_ir_fulldisk.py` 与
+> `satellite_providers.py` 的模块间导入必须是"包名优先、顶层名兜底"的双分支写法
+> （见这两处 `if __package__:` 块）。写成单一的包名限定导入，开发与测试全都能过，
+> 但打包后的 exe 会直接弹 `Unhandled exception in script` 并报
+> `ModuleNotFoundError: No module named 'himawari_ir_toolkit'`。
+> 曾有测试断言 `assertNotIn("mycolor", ...)` 把错误写法锁成契约，导致这个问题长期没被发现。
+
 ## 常见问题
 
 **`ValueError: unrecognized engine 'h5netcdf' must be one of your download engines`**
