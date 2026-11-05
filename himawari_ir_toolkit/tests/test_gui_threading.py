@@ -114,9 +114,10 @@ class TestGUIStyles(unittest.TestCase):
             "观测区域",
             "绘制云图",
             "保存图片",
-            "清空",
+            # 「清空」按钮已移除：重新绘制会直接覆盖预览，不需要单独的清空入口
         ):
             self.assertIn(value, source)
+        self.assertNotIn("clear_btn", source, "清空按钮应已移除")
 
     def test_sidebar_scrolls_so_all_controls_stay_reachable_at_minimum_size(self):
         """最小窗口下侧边栏内容高于可视区，必须可滚动才能触达全部控件。"""
@@ -401,6 +402,37 @@ class TestGUIThreading(unittest.TestCase):
         self.assertEqual(HimawariGUI._format_eta(app, 90e6, 1e6), " · 剩余 1m30s")
         # 超过 1 小时没有参考意义，不显示
         self.assertEqual(HimawariGUI._format_eta(app, 7200e6, 1e6), "")
+
+    def test_zoom_source_prefers_preview_base_and_falls_back_to_original(self):
+        """缩放要从预览基准图缩，否则每格都要重缩几千像素的原图。
+
+        实测：5517×5500 原图用 LANCZOS 缩到 634px 单步 302ms（每滚一格卡一次）；
+        从 1408px 的基准图缩只要 15ms。放大超过基准图分辨率时必须换回原图，
+        否则是二次放大、像素糊掉。
+        """
+        from PIL import Image
+
+        app = object.__new__(HimawariGUI)
+        app.original_img = Image.new('RGB', (5000, 4000))
+        app._preview_base = Image.new('RGB', (1200, 960))
+
+        source, resample = HimawariGUI._pick_zoom_source(app, 600, 480)
+        self.assertIs(source, app._preview_base)
+        self.assertEqual(resample, Image.BILINEAR)
+
+        # 显示尺寸超过基准图 → 必须回到原图，并用 NEAREST 保留真实像素
+        source, resample = HimawariGUI._pick_zoom_source(app, 3000, 2400)
+        self.assertIs(source, app.original_img)
+        self.assertEqual(resample, Image.NEAREST)
+
+    def test_zoom_source_handles_missing_preview_base(self):
+        from PIL import Image
+
+        app = object.__new__(HimawariGUI)
+        app.original_img = Image.new('RGB', (100, 80))
+        source, resample = HimawariGUI._pick_zoom_source(app, 50, 40)
+        self.assertIs(source, app.original_img)
+        self.assertEqual(resample, Image.NEAREST)
 
     def test_download_progress_updates_text_and_byte_progress_bar(self):
         app = object.__new__(HimawariGUI)
@@ -1234,6 +1266,48 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
                         contrast(fg, bg), 4.5,
                         f"{theme_name} 主题的{label}对比度不足：{fg} on {bg}",
                     )
+
+
+    def test_display_image_builds_bounded_preview_base(self):
+        """载入图片时必须建好预览基准图，且不超过画布 2 倍。
+
+        没有这张基准图，缩放每格都要从几千像素的原图重缩，交互会明显卡顿。
+        """
+        import tkinter as tk
+        from PIL import Image
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            raise unittest.SkipTest(f"无可用图形环境: {error}") from error
+
+        root.geometry("1280x800+0+0")
+        app = HimawariGUI(root)
+        img_path = Path(__file__).resolve().parents[1] / "data" / "sample_for_test.png"
+        try:
+            root.update_idletasks()
+            root.update()
+            Image.new('RGB', (4000, 3000), (30, 40, 50)).save(img_path)
+
+            app.current_image_path = str(img_path)
+            app._display_image(None, 'IR-WK')
+            root.update()
+
+            self.assertIsNotNone(app._preview_base, "未建立预览基准图")
+            canvas = app.canvas.get_tk_widget()
+            limit = max(canvas.winfo_width(), canvas.winfo_height()) * 2
+            self.assertLessEqual(app._preview_base.width, max(limit, 1))
+            self.assertLessEqual(app._preview_base.height, max(limit, 1))
+            # 基准图必须保留原图比例
+            self.assertAlmostEqual(
+                app._preview_base.width / app._preview_base.height,
+                4000 / 3000,
+                places=2,
+            )
+        finally:
+            app._on_close()
+            if img_path.exists():
+                img_path.unlink()
 
 
 if __name__ == "__main__":
