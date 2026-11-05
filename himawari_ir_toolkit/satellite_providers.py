@@ -5,7 +5,17 @@ import sys
 
 import numpy as np
 
-from himawari_ir_toolkit.satellite_scene import ProjectionMetadata, Scene
+# 三种运行形态都要能工作（与 draw_ir_fulldisk.py 同一套约定）：
+#   1. 包内导入（测试 / himawari_ir_toolkit.satellite_providers）→ 相对导入；
+#   2. 直接跑脚本 → 顶层名；
+#   3. PyInstaller 冻结 → 模块是顶层模块，不存在 himawari_ir_toolkit 包名。
+if __package__:
+    from .satellite_scene import ProjectionMetadata, Scene
+else:
+    try:
+        from himawari_ir_toolkit.satellite_scene import ProjectionMetadata, Scene
+    except ImportError:
+        from satellite_scene import ProjectionMetadata, Scene
 
 
 @dataclass(frozen=True)

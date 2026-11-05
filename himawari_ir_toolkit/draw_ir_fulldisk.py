@@ -46,6 +46,14 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 os.environ['PYCONTRAILS_CACHE_DIR'] = CACHE_DIR
 
 # 导入自定义色阶
+# 三种运行形态都要能工作：
+#   1. 包内导入（测试 / 作为 himawari_ir_toolkit.xxx 使用）→ 相对导入；
+#   2. 直接跑脚本（python himawari_ir_toolkit/draw_ir_fulldisk.py）→ 顶层名；
+#   3. **PyInstaller 冻结**（打包后）→ 模块被冻结成顶层模块，包里不存在
+#      himawari_ir_toolkit 这个包名，此时包名限定导入必然 ModuleNotFoundError。
+# 第 3 种是历史遗留缺陷：原先脚本分支只用包名限定导入，导致打出来的 exe
+# 一启动就 "No module named 'himawari_ir_toolkit'"。故这里按"包名优先、
+# 顶层名兜底"解析，而不是二选一。
 if __package__:
     from .mycolor import color_map, my_color_map
     from .satellite_providers import (
@@ -55,10 +63,17 @@ else:
     PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if PACKAGE_ROOT not in sys.path:
         sys.path.insert(0, PACKAGE_ROOT)
-    from himawari_ir_toolkit.mycolor import color_map, my_color_map
-    from himawari_ir_toolkit.satellite_providers import (
-        PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
-    )
+    try:
+        from himawari_ir_toolkit.mycolor import color_map, my_color_map
+        from himawari_ir_toolkit.satellite_providers import (
+            PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+        )
+    except ImportError:
+        # 冻结环境（以及"脚本与模块同目录"的直接运行方式）：模块以顶层名存在
+        from mycolor import color_map, my_color_map
+        from satellite_providers import (
+            PROVIDER_CONFIGS, get_provider_config, load_goes_scene, validate_archive_date,
+        )
 
 # ============================================================
 # 配置参数

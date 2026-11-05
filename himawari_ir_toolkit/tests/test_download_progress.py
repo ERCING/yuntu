@@ -79,8 +79,33 @@ class TestDownloadProgress(unittest.TestCase):
         }
         self.assertIn("himawari_ir_toolkit.mycolor", imported_modules)
         self.assertIn("himawari_ir_toolkit.satellite_providers", imported_modules)
-        self.assertNotIn("mycolor", imported_modules)
-        self.assertNotIn("satellite_providers", imported_modules)
+
+        # 冻结环境（PyInstaller）把模块冻结成顶层模块，包里不存在
+        # himawari_ir_toolkit 这个包名，包名限定导入必然失败。因此脚本分支
+        # 必须有"顶层名兜底"，且兜底要写在 except ImportError 里。
+        # 历史教训：这里原先断言 assertNotIn("mycolor", ...)，等于把"只允许
+        # 包名限定导入"锁成契约，结果打出来的 exe 一启动就
+        # ModuleNotFoundError: No module named 'himawari_ir_toolkit'。
+        self.assertIn("mycolor", imported_modules)
+        self.assertIn("satellite_providers", imported_modules)
+
+        try_block = next(
+            node for node in ast.walk(ast.Module(body=script_branch, type_ignores=[]))
+            if isinstance(node, ast.Try)
+        )
+        qualified = {
+            node.module
+            for node in ast.walk(ast.Module(body=try_block.body, type_ignores=[]))
+            if isinstance(node, ast.ImportFrom)
+        }
+        fallback = {
+            node.module
+            for node in ast.walk(ast.Module(body=try_block.handlers[0].body, type_ignores=[]))
+            if isinstance(node, ast.ImportFrom)
+        }
+        # 包名限定导入放在 try 里，顶层名导入放在 except ImportError 里
+        self.assertEqual(qualified, {"himawari_ir_toolkit.mycolor", "himawari_ir_toolkit.satellite_providers"})
+        self.assertEqual(fallback, {"mycolor", "satellite_providers"})
 
     def test_cli_list_exits_before_drawing(self):
         module = importlib.import_module("himawari_ir_toolkit.draw_ir_fulldisk")
