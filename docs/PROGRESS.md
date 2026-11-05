@@ -7,7 +7,7 @@
 
 ---
 
-## 一、已完成（两个提交）
+## 一、已完成（三个提交）
 
 ### `f970904` — 修复 UI 队列假死、深色主题泄漏、装饰字号区域特例
 
@@ -31,6 +31,12 @@
 | 附带 | `bgerror ... _refresh_responsive` | 首帧 `after(0, ...)` 未存 id |
 
 对应改动：`WM_DELETE_WINDOW → _on_close`（有在飞任务先 `askyesno` 确认）、`_cancel_pending_callbacks()`（5 处 after）、`_cancel_matplotlib_callbacks()`（`_idle_draw_id` / `_event_loop_id`）、关窗次序改为 取消回调 → `quit()` → `destroy()`、`_set_draw_button_state` 无论任务是否失效都清 `_draw_in_flight`。
+
+### 后续提交 — 补齐 README
+
+仓库此前**没有任何 README**。已新增根目录 [`README.md`](../README.md)：环境要求、安装、GUI 与 CLI 用法、完整参数表、平台/波段/色阶矩阵、GOES 归档窗口、输出命名规则、测试与打包命令、常见问题（含 `h5netcdf` 缺失、CMIPF slot、中文乱码等实际踩过的坑）、已知限制。
+
+其中"已知限制"一节如实列出了尚未接线或未实现的项（右侧图层栏、经纬网、配置持久化、无取消机制），避免使用者按 README 操作后发现功能不存在。
 
 ---
 
