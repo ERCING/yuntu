@@ -253,11 +253,19 @@ class HimawariGUI:
         self._resize_after_id = None
         self._compact = False        # 窄窗模式：隐藏状态栏次要信息
 
+        # 生命周期状态：关窗流程与在飞任务
+        self._closing = False        # 关窗已启动：UI 泵停止续排
+        self._draw_in_flight = False  # 后台绘制线程是否仍在运行
+        self._pump_after_id = None   # UI 泵的 after id，关窗时必须取消
+        self._initial_layout_after_id = None  # 首帧布局回填的 after id
+
         # 初始化UI
         self._setup_styles()
         self._init_ui()
         self._bind_responsive()
         self._process_ui_queue()
+        # 关窗统一走 _on_close，而不是让 Tk 直接销毁窗口
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
     # ============================================================
     # 响应式尺度
@@ -315,8 +323,10 @@ class HimawariGUI:
         每次都重建 ttk 样式 + 重配全部字体，主线程会被打满。
         """
         self.root.bind('<Configure>', self._on_root_configure, add='+')
-        # 首帧还没拿到真实宽度，等窗口映射完成后再做一次布局
-        self.root.after(0, self._refresh_responsive)
+        # 首帧还没拿到真实宽度，等窗口映射完成后再做一次布局。
+        # 必须存下 id：窗口若在这之前就被关闭，这条 pending 的 after 会在
+        # 销毁之后触发，报 bgerror "invalid command name ..._refresh_responsive"。
+        self._initial_layout_after_id = self.root.after(0, self._refresh_responsive)
 
     def _on_root_configure(self, event=None):
         """<Configure> 防抖：只在根窗口宽度真正跨档或变化时才重排。"""
@@ -337,6 +347,7 @@ class HimawariGUI:
     def _refresh_responsive(self):
         """按当前窗口宽度重算档位：栏宽、字号、次要元素显隐。"""
         self._resize_after_id = None
+        self._initial_layout_after_id = None
         width = self.root.winfo_width()
         if width <= 1:
             return
@@ -1627,6 +1638,8 @@ class HimawariGUI:
         self._next_task_id += 1
         task_id = self._next_task_id
         self._active_task_id = task_id
+        # 标记有任务在飞：关窗时据此确认，避免"正在下载却被静默中断"
+        self._draw_in_flight = True
         self.draw_btn.config(state=tk.DISABLED)
         self._show_status_feedback('Working', f"正在下载 {DATA_TYPES[data_type]['name']} {band} 数据...")
         self.status_var.set("⏳  正在下载数据...")
@@ -1715,10 +1728,88 @@ class HimawariGUI:
                 except Exception:
                     # sys.stderr 为 None 时 print_exc 会再抛，留痕不能再把泵带崩
                     pass
+        # 关窗流程已启动就不再续排：否则 after 会在窗口销毁后触发，
+        # Tk 报 bgerror "invalid command name ..._process_ui_queue"。
+        self._pump_after_id = None
+        if getattr(self, '_closing', False):
+            return
         try:
-            self.root.after(50, self._process_ui_queue)
+            self._pump_after_id = self.root.after(50, self._process_ui_queue)
         except tk.TclError:
             # 窗口正在销毁时 after 会抛，此时泵自然终止
+            self._pump_after_id = None
+
+    def _cancel_pending_callbacks(self):
+        """取消所有挂起的 after，避免窗口销毁后仍有回调被触发。
+
+        Tk 在窗口销毁时会连对应 Tcl 命令一起删掉，此时若还有 pending 的 after
+        指向它，触发时就会抛 bgerror "invalid command name ..."，表现为退出时
+        控制台/日志里冒出一串看着像崩溃的噪音。
+        """
+        for attr in ('_pump_after_id', '_resize_after_id', 'zoom_after_id',
+                     '_status_feedback_after_id', '_initial_layout_after_id'):
+            after_id = getattr(self, attr, None)
+            if after_id is None:
+                continue
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            setattr(self, attr, None)
+
+    def _cancel_matplotlib_callbacks(self):
+        """取消 matplotlib TkAgg 画布挂起的 idle 重绘。
+
+        FigureCanvasTk 用 after_idle 排队重绘（_idle_draw_id）并挂了一个事件循环
+        回调（_event_loop_id）。窗口若在 after 回调里被销毁，这些 Tcl 命令已随销毁
+        一起消失，idle 回调再触发就会报
+        `bgerror ... invalid command name "...idle_draw"`，而且会让 mainloop 卡住
+        不退出（关窗后进程残留）。官方 FigureManagerTk.destroy 也是这么取消的。
+        """
+        canvas = getattr(self, 'canvas', None)
+        tkcanvas = getattr(canvas, '_tkcanvas', None)
+        if tkcanvas is None:
+            return
+        for attr in ('_idle_draw_id', '_event_loop_id'):
+            after_id = getattr(canvas, attr, None)
+            if not after_id:
+                continue
+            try:
+                tkcanvas.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            setattr(canvas, attr, None)
+
+    def _on_close(self):
+        """关窗统一出口：确认在飞任务 → 取消挂起的 after → 销毁窗口。
+
+        没有这个出口时，点右上角关闭会直接销毁窗口，而工作线程仍在下载/绘图，
+        且 UI 泵的 after 还挂着，于是退出噪音与半截文件同时出现。
+        """
+        if getattr(self, '_draw_in_flight', False) and not getattr(self, '_closing', False):
+            try:
+                confirmed = messagebox.askyesno(
+                    "正在绘制",
+                    "云图仍在下载或绘制中。现在退出会中断本次任务，"
+                    "已开始但未写完的图片可能残留在 data 目录。\n\n确定退出吗？",
+                    parent=self.root,
+                )
+            except tk.TclError:
+                confirmed = True
+            if not confirmed:
+                return
+        self._closing = True
+        self._cancel_pending_callbacks()
+        self._cancel_matplotlib_callbacks()
+        # 先 quit 停掉事件循环再 destroy。只 destroy 时，若当前正处在 after 回调里，
+        # mainloop 有可能不返回，表现为"窗口没了但进程还在"。
+        try:
+            self.root.quit()
+        except tk.TclError:
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
             pass
 
     def _set_progress_text(self, text):
@@ -1771,6 +1862,10 @@ class HimawariGUI:
             self.progress_var.set(f"查询文件大小：第 {file_index}/{file_count} 个文件")
 
     def _set_draw_button_state(self, task_id, state):
+        # 这是工作线程 finally 里必投的信号，代表"后台线程已结束"这一事实本身。
+        # 无论任务是否已失效（_clear_image 会把 _active_task_id 置 None）都要记录，
+        # 否则关窗确认会一直以为还有任务在跑。
+        self._draw_in_flight = False
         if task_id == self._active_task_id:
             self.draw_btn.config(state=state)
 

@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .dbg/
 debug-*.md
+# 沙箱权限诊断与临时验证脚本（含 ACL 回滚备份，不入库）
+.acl-recovery/
 data/
 himawari_ir_toolkit/data/
 himawari_ir_toolkit/pycontrails_cache/

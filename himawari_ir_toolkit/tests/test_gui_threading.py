@@ -67,9 +67,22 @@ def _attach_status_widgets(app):
 class _FakeRoot:
     def __init__(self):
         self.after_calls = []
+        self.cancelled = []
+        self.destroyed = False
+        self.quit_called = False
 
     def after(self, delay, callback, *args):
         self.after_calls.append((delay, callback, args))
+        return f"after#{len(self.after_calls)}"
+
+    def after_cancel(self, after_id):
+        self.cancelled.append(after_id)
+
+    def quit(self):
+        self.quit_called = True
+
+    def destroy(self):
+        self.destroyed = True
 
     def update(self):
         raise AssertionError("worker thread must not call root.update directly")
@@ -264,6 +277,63 @@ class TestGUIThreading(unittest.TestCase):
         # 异常要留痕，但泵必须照常续排
         self.assertTrue(log.called)
         self.assertEqual(len(app.root.after_calls), 1)
+
+    def test_ui_pump_stops_rescheduling_while_closing(self):
+        """关窗后泵不得再续排，否则 after 会在窗口销毁后触发并报 bgerror。"""
+        app = object.__new__(HimawariGUI)
+        app.root = _FakeRoot()
+        app.ui_queue = queue.Queue()
+        app._closing = True
+
+        HimawariGUI._process_ui_queue(app)
+
+        self.assertEqual(app.root.after_calls, [])
+        self.assertIsNone(app._pump_after_id)
+
+    def test_on_close_cancels_pending_callbacks_and_destroys_window(self):
+        app = object.__new__(HimawariGUI)
+        app.root = _FakeRoot()
+        app._draw_in_flight = False
+        app._closing = False
+        app._pump_after_id = "pump"
+        app._resize_after_id = "resize"
+        app.zoom_after_id = "zoom"
+        app._status_feedback_after_id = "status"
+
+        HimawariGUI._on_close(app)
+
+        self.assertTrue(app.root.destroyed)
+        self.assertEqual(
+            sorted(app.root.cancelled), ["pump", "resize", "status", "zoom"]
+        )
+        # 取消后必须置空，避免二次取消已失效的 id
+        self.assertIsNone(app._pump_after_id)
+        self.assertIsNone(app.zoom_after_id)
+
+    def test_on_close_asks_before_aborting_in_flight_draw(self):
+        app = object.__new__(HimawariGUI)
+        app.root = _FakeRoot()
+        app._draw_in_flight = True
+        app._closing = False
+        app._pump_after_id = None
+        app._resize_after_id = None
+        app.zoom_after_id = None
+        app._status_feedback_after_id = None
+
+        with patch("himawari_ir_toolkit.himawari_gui.messagebox.askyesno",
+                   return_value=False) as ask:
+            HimawariGUI._on_close(app)
+
+        # 用户选择"不退出"：窗口必须还在，任务继续
+        self.assertTrue(ask.called)
+        self.assertFalse(app.root.destroyed)
+        self.assertFalse(app._closing)
+
+        with patch("himawari_ir_toolkit.himawari_gui.messagebox.askyesno",
+                   return_value=True):
+            HimawariGUI._on_close(app)
+
+        self.assertTrue(app.root.destroyed)
 
     def test_download_progress_updates_text_and_byte_progress_bar(self):
         app = object.__new__(HimawariGUI)
@@ -819,6 +889,38 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
             self.assertEqual(app.zoom_var.get(), "100%")
         finally:
             root.destroy()
+
+    def test_close_path_cancels_all_pending_callbacks_with_real_tk(self):
+        """真实 Tk 下关窗必须把 UI 泵和 matplotlib 的 idle 重绘都取消掉。
+
+        这两处漏一个，窗口销毁后挂着的回调就会触发，报
+        `bgerror ... invalid command name`，并且能让 mainloop 不返回
+        （窗口没了但进程还在）。fake 替身验证不了，只能真建窗口。
+        """
+        import tkinter as tk
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            raise unittest.SkipTest(f"无可用图形环境: {error}") from error
+
+        root.withdraw()
+        app = HimawariGUI(root)
+        root.update_idletasks()
+        # 制造一个 pending 的 idle 重绘，模拟真实使用中"刚重绘完就关窗"
+        app.canvas.draw_idle()
+        self.assertIsNotNone(app._pump_after_id)
+        self.assertIsNotNone(app.canvas._idle_draw_id)
+
+        app._on_close()
+
+        self.assertTrue(app._closing)
+        self.assertIsNone(app._pump_after_id)
+        self.assertIsNone(app.canvas._idle_draw_id)
+        self.assertIsNone(app.canvas._event_loop_id)
+        # 窗口确实销毁了：winfo 命令随应用一起消失
+        with self.assertRaises(tk.TclError):
+            root.winfo_exists()
 
 
 if __name__ == "__main__":
