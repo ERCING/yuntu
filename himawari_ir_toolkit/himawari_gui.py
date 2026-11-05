@@ -9,6 +9,7 @@ import os
 import threading
 import datetime
 import queue
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import traceback
@@ -1648,6 +1649,9 @@ class HimawariGUI:
         self._active_task_id = task_id
         # 标记有任务在飞：关窗时据此确认，避免"正在下载却被静默中断"
         self._draw_in_flight = True
+        # 新任务重置速率采样，否则会沿用上一个任务的速率算剩余时间
+        self._download_sample = None
+        self._download_rate = None
         self.draw_btn.config(state=tk.DISABLED)
         self._show_status_feedback('Working', f"正在下载 {DATA_TYPES[data_type]['name']} {band} 数据...")
         self.status_var.set("⏳  正在下载数据...")
@@ -1875,15 +1879,53 @@ class HimawariGUI:
         }
         return colors.get(kind, pal['text_subtle'])
 
+    def _update_download_rate(self, downloaded_bytes):
+        """根据两次采样估算瞬时速率（字节/秒），返回当前速率或 None。
+
+        慢链路下用户最想知道的不是"已经下了多少"，而是"还要多久"。速率必须
+        按采样窗口算，且要防两种毛刺：
+        - 采样过密（同一轮 UI 泵里收到多个块回调）会让间隔趋近 0、速率爆表；
+        - 计数回退（重试从头读）会算出负速率。
+        这两种情况都跳过本次采样，沿用上一次的有效速率。
+        """
+        now = time.monotonic()
+        previous = getattr(self, '_download_sample', None)
+        if previous is not None:
+            previous_bytes, previous_time = previous
+            elapsed = now - previous_time
+            if elapsed < 0.3 or downloaded_bytes < previous_bytes:
+                return getattr(self, '_download_rate', None)
+            self._download_rate = (downloaded_bytes - previous_bytes) / elapsed
+            self._download_sample = (downloaded_bytes, now)
+            return self._download_rate
+        self._download_sample = (downloaded_bytes, now)
+        return getattr(self, '_download_rate', None)
+
+    def _format_eta(self, remain_bytes, rate):
+        """把剩余字节换算成可读的剩余时间；超过 1 小时就不显示了（意义不大）。"""
+        if not rate or rate <= 0 or remain_bytes <= 0:
+            return ""
+        seconds = int(remain_bytes / rate)
+        if seconds <= 0:
+            return ""
+        if seconds < 60:
+            return f" · 剩余 {seconds}s"
+        if seconds < 3600:
+            return f" · 剩余 {seconds // 60}m{seconds % 60:02d}s"
+        return ""
+
     def _set_download_progress(self, task_id, downloaded_bytes, total_bytes, file_index, file_count):
         if task_id != self._active_task_id:
             return
         if total_bytes:
             percent = downloaded_bytes / total_bytes * 100
             self.download_progress.config(maximum=total_bytes, value=downloaded_bytes)
+            rate = self._update_download_rate(downloaded_bytes)
+            speed_text = f" · {rate / 1024 / 1024:.1f} MB/s" if rate else ""
+            eta_text = self._format_eta(total_bytes - downloaded_bytes, rate)
             self.progress_var.set(
                 f"下载中：第 {file_index}/{file_count} 个文件，{downloaded_bytes / 1024 / 1024:.1f} / "
-                f"{total_bytes / 1024 / 1024:.1f} MB ({percent:.0f}%)"
+                f"{total_bytes / 1024 / 1024:.1f} MB ({percent:.0f}%){speed_text}{eta_text}"
             )
         else:
             self.download_progress.config(maximum=1, value=0)

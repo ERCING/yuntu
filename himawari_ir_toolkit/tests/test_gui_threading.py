@@ -348,6 +348,60 @@ class TestGUIThreading(unittest.TestCase):
 
         self.assertTrue(app.root.destroyed)
 
+    def test_download_progress_shows_speed_and_remaining_time(self):
+        """慢网下用户最需要知道"还要多久"，所以状态栏要显示速率与剩余时间。"""
+        app = object.__new__(HimawariGUI)
+        app.progress_var = type("ProgressText", (), {"value": None, "set": lambda self, value: setattr(self, "value", value)})()
+        app.download_progress = _ProgressBar()
+        app._active_task_id = 1
+
+        # 第一次采样只建立基线，还不该有速率
+        with patch("himawari_ir_toolkit.himawari_gui.time.monotonic", return_value=100.0):
+            HimawariGUI._set_download_progress(app, 1, 1 * 1024 * 1024, 10 * 1024 * 1024, 1, 1)
+        self.assertNotIn("MB/s", app.progress_var.value)
+
+        # 2 秒后前进 4MB → 2.0 MB/s，剩余 5MB → 约 2s
+        with patch("himawari_ir_toolkit.himawari_gui.time.monotonic", return_value=102.0):
+            HimawariGUI._set_download_progress(app, 1, 5 * 1024 * 1024, 10 * 1024 * 1024, 1, 1)
+
+        text = app.progress_var.value
+        self.assertIn("2.0 MB/s", text)
+        self.assertIn("剩余", text)
+        self.assertIn("MB", text)
+
+    def test_download_rate_ignores_samples_that_are_too_close(self):
+        """同一轮 UI 泵里收到多个块回调时，间隔趋近 0 会让速率爆表，必须跳过。"""
+        app = object.__new__(HimawariGUI)
+        app._active_task_id = 1
+        app.progress_var = type("ProgressText", (), {"value": None, "set": lambda self, value: setattr(self, "value", value)})()
+        app.download_progress = _ProgressBar()
+
+        with patch("himawari_ir_toolkit.himawari_gui.time.monotonic", return_value=100.0):
+            HimawariGUI._update_download_rate(app, 1024 * 1024)
+        # 间隔仅 0.01s：不采样
+        with patch("himawari_ir_toolkit.himawari_gui.time.monotonic", return_value=100.01):
+            rate = HimawariGUI._update_download_rate(app, 2 * 1024 * 1024)
+        self.assertIsNone(rate)
+
+    def test_download_rate_ignores_counter_regression(self):
+        """重试会让字节计数回退，此时不得算出负速率。"""
+        app = object.__new__(HimawariGUI)
+        with patch("himawari_ir_toolkit.himawari_gui.time.monotonic", return_value=100.0):
+            HimawariGUI._update_download_rate(app, 8 * 1024 * 1024)
+        app._download_rate = 1.5e6
+        with patch("himawari_ir_toolkit.himawari_gui.time.monotonic", return_value=102.0):
+            rate = HimawariGUI._update_download_rate(app, 2 * 1024 * 1024)
+        self.assertEqual(rate, 1.5e6)
+
+    def test_eta_formatting(self):
+        app = object.__new__(HimawariGUI)
+        self.assertEqual(HimawariGUI._format_eta(app, 0, 1e6), "")
+        self.assertEqual(HimawariGUI._format_eta(app, 1024, 0), "")
+        self.assertEqual(HimawariGUI._format_eta(app, 2e6, 1e6), " · 剩余 2s")
+        self.assertEqual(HimawariGUI._format_eta(app, 90e6, 1e6), " · 剩余 1m30s")
+        # 超过 1 小时没有参考意义，不显示
+        self.assertEqual(HimawariGUI._format_eta(app, 7200e6, 1e6), "")
+
     def test_download_progress_updates_text_and_byte_progress_bar(self):
         app = object.__new__(HimawariGUI)
         app.progress_var = type("ProgressText", (), {"value": None, "set": lambda self, value: setattr(self, "value", value)})()
