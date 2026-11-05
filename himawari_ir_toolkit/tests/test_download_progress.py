@@ -628,6 +628,143 @@ class TestDownloadProgress(unittest.TestCase):
         self.assertEqual(downloaded, [b"abcd"])
         self.assertEqual(fs.open_count, 2)
 
+    def _render_scene_with_fixed_colormap(self, base_cmap, base_norm, **kwargs):
+        """用给定的 (cmap, norm) 渲染一次场景，返回 imshow 的关键字。
+
+        my_color_map 被 patch 成固定返回值，这样"是否被替换成新对象"可以靠身份判断；
+        但色阶本身仍是真实的 LinearSegmentedColormap，reverse_cmap=True 时
+        .reversed() 才有意义。fig/ax 用 MagicMock，不真正画图。
+        """
+        from himawari_ir_toolkit.draw_ir_fulldisk import draw_satellite_scene
+
+        scene = SimpleNamespace(
+            data=np.array([[1.0, 2.0], [3.0, 4.0]]),
+            x_scan_rad=np.array([-0.1, 0.1]),
+            y_scan_rad=np.array([-0.2, 0.2]),
+            region="FLDK",
+            projection=SimpleNamespace(perspective_point_height=35786023),
+        )
+        fig = MagicMock()
+        ax = MagicMock()
+        fig.add_subplot.return_value = ax
+
+        with patch(
+            "himawari_ir_toolkit.draw_ir_fulldisk.build_scene_geostationary_crs", return_value=object()
+        ), patch(
+            "himawari_ir_toolkit.draw_ir_fulldisk.my_color_map", return_value=(base_cmap, base_norm)
+        ), patch(
+            "himawari_ir_toolkit.draw_ir_fulldisk.plt.figure", return_value=fig
+        ), patch("himawari_ir_toolkit.draw_ir_fulldisk.plt.close"):
+            draw_satellite_scene(scene, "IR-CC", "scene.png", 100, **kwargs)
+
+        ax.imshow.assert_called_once()
+        _, imshow_kwargs = ax.imshow.call_args
+        return imshow_kwargs
+
+    def test_draw_satellite_scene_reverse_cmap_swaps_cmap_but_keeps_norm(self):
+        base_cmap, base_norm = my_color_map("IR-CC")
+        plain_kwargs = self._render_scene_with_fixed_colormap(base_cmap, base_norm)
+        reversed_kwargs = self._render_scene_with_fixed_colormap(base_cmap, base_norm, reverse_cmap=True)
+
+        # 默认不反转：原样拿到色阶表对象
+        self.assertIs(plain_kwargs["cmap"], base_cmap)
+        self.assertIs(plain_kwargs["norm"], base_norm)
+
+        # 反转：cmap 换成了新对象（_r 副本），norm 一个字段都没动
+        self.assertIsNot(reversed_kwargs["cmap"], plain_kwargs["cmap"])
+        self.assertEqual(reversed_kwargs["cmap"].name, f"{base_cmap.name}_r")
+        self.assertIs(reversed_kwargs["norm"], base_norm)
+        self.assertEqual(reversed_kwargs["norm"].vmin, base_norm.vmin)
+        self.assertEqual(reversed_kwargs["norm"].vmax, base_norm.vmax)
+
+    def test_draw_satellite_scene_applies_vmin_vmax_override(self):
+        base_cmap, base_norm = my_color_map("IR-CC")
+        imshow_kwargs = self._render_scene_with_fixed_colormap(base_cmap, base_norm, vmin=-50, vmax=10)
+
+        norm = imshow_kwargs["norm"]
+        self.assertEqual(norm.vmin, -50)
+        self.assertEqual(norm.vmax, 10)
+        self.assertIsNot(norm, base_norm)
+        # 未开反转，色阶本身不该被换掉
+        self.assertIs(imshow_kwargs["cmap"], base_cmap)
+
+    def test_draw_satellite_scene_keeps_table_bound_for_unspecified_side(self):
+        base_cmap, base_norm = my_color_map("IR-CC")
+        imshow_kwargs = self._render_scene_with_fixed_colormap(base_cmap, base_norm, vmin=-70)
+
+        norm = imshow_kwargs["norm"]
+        self.assertEqual(norm.vmin, -70)
+        self.assertEqual(norm.vmax, base_norm.vmax)
+
+    def test_draw_satellite_scene_default_color_args_keep_table_range(self):
+        base_cmap, base_norm = my_color_map("IR-CC")
+        imshow_kwargs = self._render_scene_with_fixed_colormap(base_cmap, base_norm)
+
+        # IR-CC 色阶表自带范围 -100 ~ 40，默认参数必须原样沿用
+        self.assertEqual(imshow_kwargs["norm"].vmin, -100)
+        self.assertEqual(imshow_kwargs["norm"].vmax, 40)
+        self.assertIs(imshow_kwargs["norm"], base_norm)
+        self.assertIs(imshow_kwargs["cmap"], base_cmap)
+
+    def test_draw_entry_rejects_invalid_vmin_vmax_before_loading(self):
+        from himawari_ir_toolkit.draw_ir_fulldisk import draw_ir_fulldisk
+
+        cases = [
+            {"vmin": 10, "vmax": -50},
+            {"vmin": 0, "vmax": 0},
+        ]
+        with patch("himawari_ir_toolkit.draw_ir_fulldisk.load_goes_scene") as load_goes_scene:
+            for kwargs in cases:
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "Invalid vmin/vmax"):
+                    draw_ir_fulldisk(
+                        "2026-08-07T12:30:00", "IR-CC", dpi=100,
+                        platform="GOES-18", band="B14", **kwargs,
+                    )
+
+        # 校验必须早于取数：GOES 加载器一次都不该被调用
+        load_goes_scene.assert_not_called()
+
+    def test_draw_entry_forwards_color_args_to_scene_renderer(self):
+        from datetime import datetime
+        from himawari_ir_toolkit.draw_ir_fulldisk import draw_ir_fulldisk
+
+        scene = SimpleNamespace(scan_start=datetime(2026, 8, 7, 12, 30))
+        with patch(
+            "himawari_ir_toolkit.draw_ir_fulldisk.load_goes_scene", return_value=scene
+        ), patch(
+            "himawari_ir_toolkit.draw_ir_fulldisk.draw_satellite_scene", return_value=("scene.png", object(), object())
+        ) as draw_scene:
+            draw_ir_fulldisk(
+                "2026-08-07T12:30:00", "IR-CC", dpi=100,
+                platform="GOES-18", band="B14",
+                vmin=-50, vmax=10, reverse_cmap=True,
+            )
+
+        kwargs = draw_scene.call_args.kwargs
+        self.assertEqual(kwargs["vmin"], -50)
+        self.assertEqual(kwargs["vmax"], 10)
+        self.assertTrue(kwargs["reverse_cmap"])
+
+    def test_cli_colormap_options_are_forwarded_to_draw(self):
+        module = importlib.import_module("himawari_ir_toolkit.draw_ir_fulldisk")
+        with patch.object(module, "draw_ir_fulldisk") as draw, patch.object(
+            sys, "argv", ["draw_ir_fulldisk.py", "--vmin", "-50", "--vmax", "10", "--reverse"]
+        ):
+            module.main()
+
+        kwargs = draw.call_args.kwargs
+        self.assertEqual(kwargs["vmin"], -50.0)
+        self.assertEqual(kwargs["vmax"], 10.0)
+        self.assertTrue(kwargs["reverse_cmap"])
+
+    def test_cli_colormap_options_default_to_no_override(self):
+        module = importlib.import_module("himawari_ir_toolkit.draw_ir_fulldisk")
+        args = module.build_parser().parse_args([])
+
+        self.assertIsNone(args.vmin)
+        self.assertIsNone(args.vmax)
+        self.assertFalse(args.reverse)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,8 @@ Himawari-9 卫星云图绘制脚本
     python draw_ir_fulldisk.py --data-type WV            # 水汽
     python draw_ir_fulldisk.py --data-type VIS           # 可见光
     python draw_ir_fulldisk.py --region T                # 机动观测区域
+    python draw_ir_fulldisk.py --vmin -80 --vmax 30      # 覆盖色阶取值范围
+    python draw_ir_fulldisk.py --reverse                 # 反转色阶
     python draw_ir_fulldisk.py --list                     # 列出可用色阶
 """
 
@@ -447,9 +449,24 @@ def _resolve_data_type_from_scheme(scheme):
     raise ValueError(f"Unknown scheme: {scheme}")
 
 
-def draw_satellite_scene(scene, scheme, out_path, dpi, add_decorations=False, progress_callback=None):
-    data_type = _resolve_data_type_from_scheme(scheme)
+def _resolve_colormap(scheme, vmin, vmax, reverse_cmap):
+    '''按需覆盖取值范围、反转色阶；默认参数下与 my_color_map(scheme) 完全等价。'''
     cmap, norm = my_color_map(scheme)
+    if reverse_cmap:
+        cmap = cmap.reversed()
+    if vmin is not None or vmax is not None:
+        lo = norm.vmin if vmin is None else float(vmin)
+        hi = norm.vmax if vmax is None else float(vmax)
+        if not hi > lo:
+            raise ValueError(f'Invalid vmin/vmax: vmin={lo} must be less than vmax={hi}')
+        norm = matplotlib.colors.Normalize(vmin=lo, vmax=hi)
+    return cmap, norm
+
+
+def draw_satellite_scene(scene, scheme, out_path, dpi, add_decorations=False,
+                         progress_callback=None, vmin=None, vmax=None, reverse_cmap=False):
+    data_type = _resolve_data_type_from_scheme(scheme)
+    cmap, norm = _resolve_colormap(scheme, vmin, vmax, reverse_cmap)
     render_data = scene.data
     x_scan = scene.x_scan_rad
     y_scan = scene.y_scan_rad
@@ -521,7 +538,8 @@ def _extract_render_inputs(da, band, is_bt):
 
 def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
                      out_path=None, dpi=150, region='F', data_type='IR', band=None,
-                     add_decorations=False, progress_callback=None, platform='Himawari-9'):
+                     add_decorations=False, progress_callback=None, platform='Himawari-9',
+                     vmin=None, vmax=None, reverse_cmap=False):
     """
     下载并绘制 Himawari 卫星云图
 
@@ -543,6 +561,10 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
         波段名称: IR可选B13/B14, WV可选B08/B09/AVG, VIS可选B03
     add_decorations : bool
         是否添加装饰元素: 边框、时间波段信息、色阶柱
+    vmin, vmax : float or None
+        覆盖色阶表自带的取值范围；None 表示用色阶表自带值（默认，行为不变）
+    reverse_cmap : bool
+        是否反转色阶；False 表示不反转（默认，行为不变）
 
     Returns
     -------
@@ -569,6 +591,11 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
     region_full = region_map.get(region, region)
     if region_full not in region_map.values():
         raise ValueError(f"Invalid region: {region}")
+
+    # 着色参数必须在任何取数动作之前校验：vmin/vmax 非法时不该先下载数据再报错。
+    # 顺带把色阶解析一次，Himawari 分支后面的绘制直接复用，避免两处各写一遍而漂移；
+    # GOES 分支由 draw_satellite_scene 内部按同一 helper 重新解析。
+    cmap, norm = _resolve_colormap(scheme, vmin, vmax, reverse_cmap)
 
     if config.bucket is not None:
         if region not in config.regions:
@@ -603,6 +630,7 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
             scene, scheme, out_path, dpi,
             add_decorations=add_decorations,
             progress_callback=progress_callback,
+            vmin=vmin, vmax=vmax, reverse_cmap=reverse_cmap,
         )
 
     from pycontrails.datalib.himawari import Himawari
@@ -701,17 +729,17 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
     else:
         central_lon = 140.7
 
-    # 获取色阶
-    cmap, norm = my_color_map(scheme)
-    vmin = float(norm.vmin)
-    vmax = float(norm.vmax)
+    # 获取色阶：入口处已按 vmin/vmax/reverse_cmap 解析好，这里只取数值用于打印。
+    # 注意不能再用 vmin/vmax 这两个名字，否则会覆盖同名入参。
+    norm_vmin = float(norm.vmin)
+    norm_vmax = float(norm.vmax)
 
     print(f"[2/3] 绘制 {dtype_config['name']} 云图 ({scheme})...")
     if is_bt:
         print(f"      亮温范围: {np.nanmin(data):.1f} ~ {np.nanmax(data):.1f} {dtype_config['unit']}")
     else:
         print(f"      反射率范围: {np.nanmin(data):.1f} ~ {np.nanmax(data):.1f}")
-    print(f"      色阶范围: {vmin:.1f} ~ {vmax:.1f}")
+    print(f"      色阶范围: {norm_vmin:.1f} ~ {norm_vmax:.1f}")
 
     # 创建投影（使用正确的 central_lon）
     geos_crs = ccrs.Geostationary(central_longitude=central_lon,
@@ -868,6 +896,12 @@ def build_parser():
                         help='观测区域: F=全圆盘, T=目标区域(机动观测), 默认: F')
     parser.add_argument('--decorations', action='store_true',
                         help='添加边框、时间波段信息和右侧色阶柱')
+    parser.add_argument('--vmin', type=float, default=None,
+                        help='色阶下限（摄氏度/百分比），默认用色阶表自带范围')
+    parser.add_argument('--vmax', type=float, default=None,
+                        help='色阶上限（摄氏度/百分比），默认用色阶表自带范围')
+    parser.add_argument('--reverse', action='store_true',
+                        help='反转色阶')
     return parser
 
 
@@ -899,7 +933,8 @@ def main():
     draw_ir_fulldisk(time_str=args.time, scheme=args.scheme,
                      out_path=args.out, dpi=args.dpi,
                      region=args.region, data_type=args.data_type, band=args.band,
-                     add_decorations=args.decorations, platform=args.platform)
+                     add_decorations=args.decorations, platform=args.platform,
+                     vmin=args.vmin, vmax=args.vmax, reverse_cmap=args.reverse)
 
 
 if __name__ == '__main__':

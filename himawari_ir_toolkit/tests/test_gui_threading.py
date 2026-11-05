@@ -4,7 +4,13 @@ import queue
 import unittest
 from unittest.mock import patch
 
-from himawari_ir_toolkit.himawari_gui import HimawariGUI, PLATFORM_OPTIONS, _platform_identifier
+from himawari_ir_toolkit.himawari_gui import (
+    HimawariGUI,
+    PLATFORM_OPTIONS,
+    _platform_identifier,
+    dark_palette,
+    light_palette,
+)
 
 
 class _ForbiddenVar:
@@ -100,7 +106,12 @@ class TestGUIStyles(unittest.TestCase):
             "数据与显示",
             "操作",
             "状态",
-            "日期时间 (UTC)",
+            # 日期字段改为内联布局后标签缩短为「日期」，UTC 由字段上下文与
+            # 时次下拉共同表达；断言跟着文案更新，但字段本身仍在。
+            "日期",
+            "时次",
+            "卫星平台",
+            "观测区域",
             "绘制云图",
             "保存图片",
             "清空",
@@ -187,9 +198,11 @@ class TestGUIStyles(unittest.TestCase):
         # 令牌色值断言落在模块级常量定义上，避免函数体直接写裸色值。
         for token, constant, color in (
             ("'primary'", "PRIMARY", "#2563eb"),
-            ("'success'", "SUCCESS", "#059669"),
+            # SUCCESS 由 #059669 调深到 #047857：前者对白底只有 3.77，
+            # 低于 WCAG AA 对正文的 4.5 要求，状态栏文字会看不清。
+            ("'success'", "SUCCESS", "#047857"),
             ("'error'", "ERROR", "#dc2626"),
-            ("'text_subtle'", "TEXT_SUBTLE", "#9ca3af"),
+            ("'text_subtle'", "TEXT_SUBTLE", "#6b7280"),
         ):
             self.assertIn(token, status_color_source)
             self.assertIn(f"{constant} = '{color}'", source)
@@ -827,7 +840,15 @@ class TestGUIPlatformSelection(unittest.TestCase):
             HimawariGUI._draw_image(app)
 
         self.assertEqual(started[0][0], app._draw_worker)
-        self.assertEqual(started[0][1][-1], "GOES-19")
+        args = started[0][1]
+        # 参数顺序：(task_id, time, scheme, region, data_type, band, platform,
+        # vmin, vmax, reverse_cmap)。按位置断言而不是取 [-1]，
+        # 否则以后再加参数这条断言会静默地测错对象。
+        self.assertEqual(args[6], "GOES-19")
+        # 温度范围默认留空 = 用色阶表自带范围，接上控件不改变既有出图外观
+        self.assertIsNone(args[7])
+        self.assertIsNone(args[8])
+        self.assertFalse(args[9])
 
     def test_draw_image_rejects_invalid_goes_minute_without_starting_thread(self):
         app = self._platform_app("GOES-19", "09:15:00")
@@ -940,11 +961,14 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
         except tk.TclError as error:
             raise unittest.SkipTest(f"无可用图形环境: {error}") from error
 
-        root.geometry("1280x800")
+        root.geometry("1280x800+0+0")
         app = HimawariGUI(root)
         try:
-            root.update_idletasks()
-            root.update()
+            # 布局要跑够轮才稳定：窗口映射、pack 分配、字体分档都在这几轮里完成。
+            # 只 update 一次时控件可能还没有真实坐标，命中测试会返回 None。
+            for _ in range(6):
+                root.update_idletasks()
+                root.update()
             for name, combo in (
                 ("year", app.year_combo),
                 ("month", app.month_combo),
@@ -962,6 +986,151 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
                     )
         finally:
             app._on_close()
+
+
+    def test_rail_fits_at_minimum_window_without_clipping(self):
+        """右栏内容必须在最小窗口下也放得下。
+
+        历史缺陷：右栏塞了 13 个从未被读取的控件（5 个图层复选框、等值线、
+        3 张输出队列卡片），1024×680 时需要 648px 而只有 544px 可用，且右栏
+        没有滚动条——底部内容被直接裁掉，用户看不见也点不到。
+        """
+        import tkinter as tk
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            raise unittest.SkipTest(f"无可用图形环境: {error}") from error
+
+        root.geometry("1024x680")
+        app = HimawariGUI(root)
+        try:
+            root.update_idletasks()
+            root.update()
+            inner = app._rail_inner
+            self.assertLessEqual(
+                inner.winfo_reqheight(), inner.winfo_height(),
+                "右栏内容高于可用高度，且右栏没有滚动条，底部控件会被裁掉",
+            )
+        finally:
+            app._on_close()
+
+    def test_sidebar_fits_at_default_window(self):
+        """侧栏在默认 1280×800 下应一屏放下，不需要滚动。
+
+        原先是「标签在上、控件在下」的竖排，6 个字段各吃约 72px，连
+        1700×960 都要滚动。改内联标签后 1280×800 即可放下。
+        """
+        import tkinter as tk
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            raise unittest.SkipTest(f"无可用图形环境: {error}") from error
+
+        root.geometry("1280x800")
+        app = HimawariGUI(root)
+        try:
+            root.update_idletasks()
+            root.update()
+            canvas = [c for c in app._sidebar.winfo_children()
+                      if isinstance(c, tk.Canvas)][0]
+            inner = [c for c in canvas.winfo_children()
+                     if isinstance(c, tk.Frame)][0]
+            self.assertLessEqual(
+                inner.winfo_reqheight(), canvas.winfo_height(),
+                "侧栏在默认窗口下仍需滚动，说明字段布局又变回了竖排",
+            )
+        finally:
+            app._on_close()
+
+    def test_removed_dead_controls_are_gone(self):
+        """13 个空转控件必须彻底移除，不能只从界面上藏起来。
+
+        它们从未被绘制流程读取，留着会误导使用者以为能用。
+        只断言标识符与控件文案，不断言叙述性注释——注释里出现"输出队列"
+        是在记录这次移除的原因，属于合法历史说明。
+        """
+        source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
+        source = source_path.read_text(encoding="utf-8")
+        for dead in ("layer_vars", "contour_var", "queue_labels",
+                     "ramp_var", "ramp_combo"):
+            self.assertNotIn(dead, source, f"空转控件标识符残留：{dead}")
+        # 界面文案同样不得残留（这些是用户能看到的字）
+        for dead_text in ("'路径追踪'", "'等值线叠加'", '"路径追踪"', '"等值线叠加"'):
+            self.assertNotIn(dead_text, source, f"空转控件文案残留：{dead_text}")
+
+    def test_rail_controls_are_wired_into_draw_call(self):
+        """右栏保留的三个控件必须真的传给引擎，而不是只放在界面上。"""
+        draw_image_source = inspect.getsource(HimawariGUI._draw_image)
+        worker_source = inspect.getsource(HimawariGUI._draw_worker)
+        self.assertIn("_read_range_inputs", draw_image_source)
+        self.assertIn("reverse_var", draw_image_source)
+        # 三个着色参数必须出现在引擎调用里
+        self.assertIn("vmin=vmin", worker_source)
+        self.assertIn("vmax=vmax", worker_source)
+        self.assertIn("reverse_cmap=reverse_cmap", worker_source)
+
+    def test_range_inputs_default_to_none_and_validate(self):
+        """温度范围留空 = 用色阶表自带范围；填错必须报错而不是静默忽略。"""
+        app = object.__new__(HimawariGUI)
+
+        class _Var:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        app.vmin_var = _Var('')
+        app.vmax_var = _Var('')
+        self.assertEqual(HimawariGUI._read_range_inputs(app), (None, None))
+
+        app.vmin_var = _Var('-50')
+        app.vmax_var = _Var('10')
+        self.assertEqual(HimawariGUI._read_range_inputs(app), (-50.0, 10.0))
+
+        app.vmin_var = _Var('abc')
+        with self.assertRaises(ValueError):
+            HimawariGUI._read_range_inputs(app)
+
+        # 下限不小于上限必须报错，否则 Normalize 会得到非法区间
+        app.vmin_var = _Var('10')
+        app.vmax_var = _Var('10')
+        with self.assertRaises(ValueError):
+            HimawariGUI._read_range_inputs(app)
+
+    def test_palette_meets_wcag_aa_contrast(self):
+        """主题令牌的对比度必须达标，否则文字看不清。
+
+        历史问题：浅色 text_subtle=#9ca3af 对白底只有 2.54（AA 需 4.5），
+        被用在状态栏、字段标签、色带刻度上；深色主按钮白字只有 3.68。
+        """
+        def luminance(hex_color):
+            raw = hex_color.lstrip('#')
+            channels = [int(raw[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+            linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+                      for c in channels]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        def contrast(fg, bg):
+            a, b = luminance(fg), luminance(bg)
+            high, low = max(a, b), min(a, b)
+            return (high + 0.05) / (low + 0.05)
+
+        for theme_name, palette in (("light", light_palette()), ("dark", dark_palette())):
+            for label, fg, bg in (
+                ("正文", palette['text'], palette['panel']),
+                ("次要", palette['text_secondary'], palette['panel']),
+                ("弱化", palette['text_muted'], palette['panel']),
+                ("最弱", palette['text_subtle'], palette['panel']),
+                ("主按钮文字", palette['primary_fg'], palette['primary']),
+            ):
+                with self.subTest(theme=theme_name, token=label):
+                    self.assertGreaterEqual(
+                        contrast(fg, bg), 4.5,
+                        f"{theme_name} 主题的{label}对比度不足：{fg} on {bg}",
+                    )
 
 
 if __name__ == "__main__":

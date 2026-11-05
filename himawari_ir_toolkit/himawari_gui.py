@@ -1,6 +1,6 @@
 """
 Himawari-9 / GOES 卫星云图分析工具 GUI
-双主题（浅色专业 / 深色）· 三栏工作台：参数区 | 图像区 | 图层栏
+双主题（浅色专业 / 深色）· 三栏工作台：参数区 | 图像区 | 色彩映射
 支持选择日期时间、数据类型和色阶方案
 """
 
@@ -20,6 +20,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # 添加当前目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draw_ir_fulldisk import draw_ir_fulldisk, DATA_TYPES
+from mycolor import my_color_map
 from satellite_providers import get_archive_window, get_provider_config
 
 
@@ -42,8 +43,11 @@ BORDER_FOCUS = '#2563eb'    # 聚焦边框
 
 TEXT_PRIMARY = '#1f2937'    # 主要文字
 TEXT_SECONDARY = '#374151'  # 次要文字
-TEXT_MUTED = '#6b7280'      # 弱化文字
-TEXT_SUBTLE = '#9ca3af'     # 最弱化文字
+# 弱化层级必须满足 WCAG AA（白底正文 ≥4.5）。原 SUBTLE=#9ca3af 对白底只有
+# 2.54，用在状态栏、字段标签、色带刻度上就是"灰得看不清"；这里把层级整体下压：
+# muted #4b5563 ≈7.4、subtle #6b7280 ≈4.83，仍保留四级层次且全部达标。
+TEXT_MUTED = '#4b5563'      # 弱化文字
+TEXT_SUBTLE = '#6b7280'     # 最弱化文字（仍 ≥4.5）
 
 PRIMARY = '#2563eb'         # 主色调（专业蓝）
 PRIMARY_HOVER = '#1d4ed8'   # 主色悬停
@@ -52,7 +56,7 @@ PRIMARY_LIGHT = '#eff6ff'   # 主色浅背景
 PRIMARY_BORDER = '#bfdbfe'  # 主色边框
 PRIMARY_FG = '#ffffff'      # 主色前景
 
-SUCCESS = '#059669'         # 成功色
+SUCCESS = '#047857'         # 成功色（原 #059669 对白底仅 3.77，改为 5.48）
 SUCCESS_BG = '#ecfdf5'      # 成功背景
 SUCCESS_BORDER = '#a7f3d0'  # 成功边框
 WARNING = '#d97706'         # 警告色
@@ -85,11 +89,14 @@ DARK_BORDER_FOCUS = '#3b82f6'
 DARK_TEXT_PRIMARY = '#e5e7eb'
 DARK_TEXT_SECONDARY = '#cbd5e1'
 DARK_TEXT_MUTED = '#9ca3af'
-DARK_TEXT_SUBTLE = '#6b7280'
+# 原 #6b7280 对深色底只有 3.57，偏弱；提亮到 #8b93a1 ≈5.58
+DARK_TEXT_SUBTLE = '#8b93a1'
 
-DARK_PRIMARY = '#3b82f6'
-DARK_PRIMARY_HOVER = '#2563eb'
-DARK_PRIMARY_PRESSED = '#1d4ed8'
+# 主按钮白字对比度必须 ≥4.5。原 #3b82f6 只有 3.68；#2563eb 为 5.17。
+# 悬停/按下相应下压一档，保持"越按越深"的观感。
+DARK_PRIMARY = '#2563eb'
+DARK_PRIMARY_HOVER = '#1d4ed8'
+DARK_PRIMARY_PRESSED = '#1e40af'
 DARK_PRIMARY_LIGHT = '#16243a'
 DARK_PRIMARY_BORDER = '#1e3a5f'
 DARK_PRIMARY_FG = '#ffffff'
@@ -148,17 +155,6 @@ def dark_palette():
 THEMES = {'light': light_palette, 'dark': dark_palette}
 
 
-def _blend_hex(color_a, color_b, ratio):
-    """在两个 #rrggbb 之间线性插值，ratio=0 返回 color_a。"""
-    ratio = max(0.0, min(1.0, ratio))
-    channels = []
-    for offset in (1, 3, 5):
-        start = int(color_a[offset:offset + 2], 16)
-        end = int(color_b[offset:offset + 2], 16)
-        channels.append(int(round(start + (end - start) * ratio)))
-    return '#{:02x}{:02x}{:02x}'.format(*channels)
-
-
 def _platform_identifier(display):
     return 'GOES-17' if display == 'GOES-17（历史）' else display
 
@@ -181,7 +177,7 @@ SCALE_TIERS = (
     (0,    10.0, 9.0,  8.5),
 )
 
-# 栏宽档位：(窗口宽度下限, 左参数区, 右图层栏, 是否常显状态栏次要信息)
+# 栏宽档位：(窗口宽度下限, 左参数区, 右色彩映射栏, 是否常显状态栏次要信息)
 RAIL_TIERS = (
     (1600, 320, 288, True),
     (1400, 304, 272, True),
@@ -737,7 +733,7 @@ class HimawariGUI:
                         arrowsize=12)
 
     def _init_ui(self):
-        """初始化 UI - 标题栏 + 三栏工作台（参数区 | 图像区 | 图层栏）+ 状态栏"""
+        """初始化 UI - 标题栏 + 三栏工作台（参数区 | 图像区 | 色彩映射）+ 状态栏"""
         # 主容器
         main_frame = ttk.Frame(self.root, style='Dark.TFrame')
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -755,7 +751,7 @@ class HimawariGUI:
         content_frame = ttk.Frame(main_frame, style='Dark.TFrame')
         content_frame.pack(fill=tk.BOTH, expand=True)
         
-        # 左：参数区  中：图像区  右：图层栏
+        # 左：参数区  中：图像区  右：色彩映射
         # 注意 pack 顺序 ≠ 视觉顺序：pack(side=LEFT/RIGHT) 按调用先后从两侧
         # 依次「吃」空间，最先 pack 的最贴近窗口边缘。所以左右两栏必须先于
         # 中栏 pack，中栏用 expand 吃掉剩余宽度；反过来先 pack 中栏，它会
@@ -777,14 +773,42 @@ class HimawariGUI:
             line.pack(side=side, fill=tk.Y)
         return line
 
-    def _field_label(self, parent, text, margin_top=12):
+    def _field_label(self, parent, text, margin_top=8):
+        """字段标签。
+
+        margin_top 默认值由 12 收到 8、下边距由 6 收到 4：侧栏有 6 个这类字段，
+        每个少 6px 就是 36px，配合分区标题收紧后，1024×680 下才可能一屏放下。
+        """
         label = tk.Label(parent, text=text,
                          bg=self._pal('panel'), fg=self._pal('text_muted'),
                          font=self._font('body'))
         self._register(label, bg='panel', fg='text_muted')
         self._font_widgets.append((label, 'body', False))
-        label.pack(anchor=tk.W, pady=(margin_top, 6))
+        label.pack(anchor=tk.W, pady=(margin_top, 4))
         return label
+
+    def _inline_field(self, parent, text, margin_top=6, label_width=7):
+        """内联字段行：标签居左固定宽、控件占满剩余横向空间，返回可放置控件的容器。
+
+        侧栏原先用「标签在上 / 控件在下」的竖排，6 个字段每个要吃掉约 72px
+        （23 标签 + 上下边距 + 31 控件），叠加后 1024×680 下必然溢出、被迫滚动。
+        内联后一行只有 31px 高，同样 6 个字段可省下约 200px。
+        """
+        row = tk.Frame(parent, bg=self._pal('panel'))
+        self._register(row, bg='panel')
+        row.pack(fill=tk.X, pady=(margin_top, 0))
+
+        label = tk.Label(row, text=text, width=label_width, anchor=tk.W,
+                         bg=self._pal('panel'), fg=self._pal('text_muted'),
+                         font=self._font('body'))
+        self._register(label, bg='panel', fg='text_muted')
+        self._font_widgets.append((label, 'body', False))
+        label.pack(side=tk.LEFT)
+
+        holder = tk.Frame(row, bg=self._pal('panel'))
+        self._register(holder, bg='panel')
+        holder.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        return holder
 
     def _create_title_bar(self, parent):
         """创建顶部标题栏。
@@ -941,18 +965,19 @@ class HimawariGUI:
         # === 时间与卫星 ===
         self._create_section_header(inner_frame, "时间与卫星")
 
-        # 日期时间标签
-        self._field_label(inner_frame, "日期时间 (UTC)", margin_top=8)
-
-        # 年月日行
-        date_frame = tk.Frame(inner_frame, bg=self._pal('panel'))
+        # 日期：标签内联 + 年月日并排。
+        # 内联后标签占掉左侧宽度，若标签过长会把三个下拉挤到放不下（「日」会被
+        # 压到 25px）。这里标签收到 6 字符宽、年/月/日改为按内容宽度打包、
+        # 只有「日」用 expand 吃掉剩余空间，保证三者都完整可见。
+        date_row = self._inline_field(inner_frame, "日期", margin_top=8, label_width=5)
+        date_frame = tk.Frame(date_row, bg=self._pal('panel'))
         self._register(date_frame, bg='panel')
         date_frame.pack(fill=tk.X)
 
         # 年
         year_frame = tk.Frame(date_frame, bg=self._pal('panel'))
         self._register(year_frame, bg='panel')
-        year_frame.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+        year_frame.pack(side=tk.LEFT, padx=(0, 4))
         self.year_var = tk.StringVar()
         # utcnow() 自 Python 3.12 起弃用且返回 naive datetime，
         # 改用带 tzinfo 的 now(timezone.utc)，避免与后续 UTC 时间换算混淆。
@@ -972,7 +997,7 @@ class HimawariGUI:
         # 月
         month_frame = tk.Frame(date_frame, bg=self._pal('panel'))
         self._register(month_frame, bg='panel')
-        month_frame.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=4)
+        month_frame.pack(side=tk.LEFT, padx=4)
         self.month_var = tk.StringVar()
         month_list = [f"{m:02d}" for m in range(1, 13)]
         self.month_combo = ttk.Combobox(month_frame, textvariable=self.month_var,
@@ -993,23 +1018,21 @@ class HimawariGUI:
         self.day_combo.pack(fill=tk.X)
         self._update_days()
 
-        # 时间选择
-        self._field_label(inner_frame, "时次")
-
+        # 时次
+        time_row = self._inline_field(inner_frame, "时次")
         self.time_var = tk.StringVar()
         time_list = [f"{h:02d}:00:00" for h in range(24)]
-        self.time_combo = ttk.Combobox(inner_frame, textvariable=self.time_var,
+        self.time_combo = ttk.Combobox(time_row, textvariable=self.time_var,
                                         values=time_list,
                                         state='readonly', style='Dark.TCombobox')
         self.time_combo.pack(fill=tk.X)
         self.time_var.set("09:00:00")
-        
-        # 卫星选择
-        self._field_label(inner_frame, "卫星平台")
 
+        # 卫星平台
+        platform_row = self._inline_field(inner_frame, "卫星平台")
         self.platform_var = tk.StringVar(value='Himawari-9')
         self.platform_combo = ttk.Combobox(
-            inner_frame,
+            platform_row,
             textvariable=self.platform_var,
             values=PLATFORM_OPTIONS,
             state='readonly',
@@ -1017,54 +1040,44 @@ class HimawariGUI:
         )
         self.platform_combo.pack(fill=tk.X)
         self.platform_combo.bind('<<ComboboxSelected>>', self._on_platform_change)
-        
-        # 观测区域
-        self._field_label(inner_frame, "观测区域")
 
+        # 观测区域
+        region_row = self._inline_field(inner_frame, "观测区域")
         self.region_var = tk.StringVar(value='F')
-        self.region_combo = ttk.Combobox(inner_frame, textvariable=self.region_var,
+        self.region_combo = ttk.Combobox(region_row, textvariable=self.region_var,
                                          state='readonly', style='Dark.TCombobox')
         self.region_combo.pack(fill=tk.X)
         self.region_combo['values'] = ('F (全圆盘)', 'T (目标区域/机动观测)')
         self.region_var.set('F (全圆盘)')
         
         # === 数据与显示 ===
-        self._create_section_header(inner_frame, "数据与显示", margin_top=20)
+        self._create_section_header(inner_frame, "数据与显示", margin_top=14)
 
         # 数据类型
-        self._field_label(inner_frame, "数据类型", margin_top=8)
-
+        type_row = self._inline_field(inner_frame, "数据类型", margin_top=8)
         self.data_type_var = tk.StringVar(value='IR')
         type_display = [f"{k} ({v['name']})" for k, v in DATA_TYPES.items()]
-        type_combo = ttk.Combobox(inner_frame, textvariable=self.data_type_var,
+        type_combo = ttk.Combobox(type_row, textvariable=self.data_type_var,
                                    values=type_display,
-                                   style='Dark.TCombobox')
+                                   state='readonly', style='Dark.TCombobox')
         type_combo.pack(fill=tk.X)
         type_combo.bind('<<ComboboxSelected>>', self._on_type_change)
         type_combo.set('IR (红外窗区)')
-        
-        # 波段
-        self._field_label(inner_frame, "波段")
 
+        # 波段
+        band_row = self._inline_field(inner_frame, "波段")
         self.band_var = tk.StringVar()
-        self.band_combo = ttk.Combobox(inner_frame, textvariable=self.band_var,
+        self.band_combo = ttk.Combobox(band_row, textvariable=self.band_var,
                                          values=DATA_TYPES['IR']['bands'],
-                                         style='Dark.TCombobox')
+                                         state='readonly', style='Dark.TCombobox')
         self.band_combo.pack(fill=tk.X)
         self.band_var.set(DATA_TYPES['IR']['default_band'])
         
-        # 色阶方案
-        self._field_label(inner_frame, "色阶方案")
+        # 色阶方案已移到右栏「色彩映射」区：原先左右各有一个色阶下拉，
+        # 左侧这个只是重复，删掉可减少一处误导并给侧栏腾出高度。
 
-        self.scheme_var = tk.StringVar()
-        self.scheme_combo = ttk.Combobox(inner_frame, textvariable=self.scheme_var,
-                                          values=DATA_TYPES['IR']['schemes'],
-                                          style='Dark.TCombobox')
-        self.scheme_combo.pack(fill=tk.X)
-        self.scheme_var.set(DATA_TYPES['IR']['default_scheme'])
-        
         # === 操作按钮 ===
-        self._create_section_header(inner_frame, "操作", margin_top=20)
+        self._create_section_header(inner_frame, "操作", margin_top=14)
 
         # 主操作按钮
         btn_container = tk.Frame(inner_frame, bg=self._pal('panel'))
@@ -1089,7 +1102,7 @@ class HimawariGUI:
         self.clear_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
         
         # === 进度状态 ===
-        self._create_section_header(inner_frame, "状态", margin_top=20)
+        self._create_section_header(inner_frame, "状态", margin_top=14)
 
         progress_card = tk.Frame(inner_frame, bg=self._pal('surface'),
                                  highlightbackground=self._pal('border'),
@@ -1216,7 +1229,7 @@ class HimawariGUI:
         progress_strip.pack_propagate(False)
 
     def _create_layer_rail(self, parent):
-        """创建右侧图层栏：图层开关 + 色彩映射 + 输出队列。
+        """创建右侧「色彩映射」栏：色阶方案 + 温度范围 + 反转。
 
         宽度由 RAIL_TIERS 档位决定（不再写死 264），窄窗时收窄，
         给中间图像区留出空间，避免画布被挤成窄条。
@@ -1236,53 +1249,32 @@ class HimawariGUI:
         inner.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
         self._rail_inner = inner
 
-        # === 图层 ===
-        self._create_section_header(inner, "图层")
-
-        self.layer_vars = {}
-        layers = (
-            ('ir_window', '红外窗区', True),
-            ('water_vapor', '水汽通道', False),
-            ('graticule', '经纬网', True),
-            ('coastline', '海岸线', True),
-            ('track', '路径追踪', False),
-        )
-        for key, label_text, default in layers:
-            var = tk.BooleanVar(value=default)
-            self.layer_vars[key] = var
-            row = tk.Frame(inner, bg=self._pal('panel'))
-            self._register(row, bg='panel')
-            row.pack(fill=tk.X, pady=(8, 0))
-            check = tk.Checkbutton(row, text=label_text, variable=var,
-                                   bg=self._pal('panel'), fg=self._pal('text_secondary'),
-                                   activebackground=self._pal('panel'),
-                                   activeforeground=self._pal('text'),
-                                   selectcolor=self._pal('input'),
-                                   highlightthickness=0, bd=0,
-                                   font=self._font('body'), anchor=tk.W)
-            self._register(check, bg='panel', fg='text_secondary',
-                           activebackground='panel', activeforeground='text',
-                           selectcolor='input')
-            self._font_widgets.append((check, 'body', False))
-            check.pack(side=tk.LEFT)
-
         # === 色彩映射 ===
-        self._create_section_header(inner, "色彩映射", margin_top=20)
+        # 说明：这里只保留"能真正影响出图"的控件。原先的 5 个图层复选框、
+        # 等值线开关、3 张输出队列卡片共 13 个控件从未被绘制流程读取，
+        # 却占掉约 350px 高度并在 1024×680 下把内容顶出可视区，已全部移除。
+        # 色阶选择也移到这里（原先左右两处各有一个，左侧那个是重复的）。
+        self._create_section_header(inner, "色彩映射")
 
-        self._field_label(inner, "色阶", margin_top=8)
-        self.ramp_var = tk.StringVar(value='IR 标准')
-        self.ramp_combo = ttk.Combobox(inner, textvariable=self.ramp_var,
-                                       values=('IR 标准', '增强对比', '灰度',
-                                               '水汽暖色', '单色'),
-                                       state='readonly', style='Dark.TCombobox')
-        self.ramp_combo.pack(fill=tk.X)
+        self._field_label(inner, "色阶方案", margin_top=6)
+
+        self.scheme_var = tk.StringVar()
+        self.scheme_combo = ttk.Combobox(inner, textvariable=self.scheme_var,
+                                          values=DATA_TYPES['IR']['schemes'],
+                                          state='readonly', style='Dark.TCombobox')
+        self.scheme_combo.pack(fill=tk.X)
+        self.scheme_var.set(DATA_TYPES['IR']['default_scheme'])
+        self.scheme_combo.bind('<<ComboboxSelected>>', self._on_scheme_change)
 
         self._field_label(inner, "温度范围 (℃)")
         range_row = tk.Frame(inner, bg=self._pal('panel'))
         self._register(range_row, bg='panel')
         range_row.pack(fill=tk.X)
 
-        self.vmin_var = tk.StringVar(value='-82')
+        # 默认留空 = 用色阶表自带的取值范围。这一点很关键：色阶表 IR 是 -100~40，
+        # 而旧版界面在这里写死 -82/32 却从未生效；若把它接上绘制流程，就等于悄悄
+        # 改变了所有出图的配色映射。留空才能保证"接上控件"不改变既有出图外观。
+        self.vmin_var = tk.StringVar(value='')
         vmin_entry = tk.Entry(range_row, textvariable=self.vmin_var, width=6,
                               bg=self._pal('input'), fg=self._pal('text'),
                               insertbackground=self._pal('text'),
@@ -1300,7 +1292,7 @@ class HimawariGUI:
         self._register(sep, bg='panel', fg='text_subtle')
         sep.pack(side=tk.LEFT, padx=6)
 
-        self.vmax_var = tk.StringVar(value='32')
+        self.vmax_var = tk.StringVar(value='')
         vmax_entry = tk.Entry(range_row, textvariable=self.vmax_var, width=6,
                               bg=self._pal('input'), fg=self._pal('text'),
                               insertbackground=self._pal('text'),
@@ -1313,7 +1305,7 @@ class HimawariGUI:
         self._font_widgets.append((vmax_entry, 'body', False))
         vmax_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # 色带预览 + 两端刻度
+        # 色带预览：按当前色阶真实取色，反转时同步翻转
         self.ramp_canvas = tk.Canvas(inner, height=10, highlightthickness=0,
                                      bg=self._pal('panel'))
         self._register_canvas(self.ramp_canvas, bg='panel')
@@ -1323,21 +1315,22 @@ class HimawariGUI:
         tick_row = tk.Frame(inner, bg=self._pal('panel'))
         self._register(tick_row, bg='panel')
         tick_row.pack(fill=tk.X)
-        tick_left = tk.Label(tick_row, text="-82", bg=self._pal('panel'),
-                             fg=self._pal('text_subtle'), font=self._font('micro'))
-        self._register(tick_left, bg='panel', fg='text_subtle')
-        self._font_widgets.append((tick_left, 'micro', False))
-        tick_left.pack(side=tk.LEFT)
-        tick_right = tk.Label(tick_row, text="32", bg=self._pal('panel'),
-                              fg=self._pal('text_subtle'), font=self._font('micro'))
-        self._register(tick_right, bg='panel', fg='text_subtle')
-        self._font_widgets.append((tick_right, 'micro', False))
-        tick_right.pack(side=tk.RIGHT)
+        self.ramp_tick_left = tk.Label(tick_row, text="", bg=self._pal('panel'),
+                                       fg=self._pal('text_subtle'), font=self._font('micro'))
+        self._register(self.ramp_tick_left, bg='panel', fg='text_subtle')
+        self._font_widgets.append((self.ramp_tick_left, 'micro', False))
+        self.ramp_tick_left.pack(side=tk.LEFT)
+        self.ramp_tick_right = tk.Label(tick_row, text="", bg=self._pal('panel'),
+                                        fg=self._pal('text_subtle'), font=self._font('micro'))
+        self._register(self.ramp_tick_right, bg='panel', fg='text_subtle')
+        self._font_widgets.append((self.ramp_tick_right, 'micro', False))
+        self.ramp_tick_right.pack(side=tk.RIGHT)
 
-        # 反转 / 等值线
+        # 反转色阶
         self.reverse_var = tk.BooleanVar(value=False)
         reverse_check = tk.Checkbutton(inner, text="反转色阶",
                                        variable=self.reverse_var,
+                                       command=self._on_scheme_change,
                                        bg=self._pal('panel'), fg=self._pal('text_secondary'),
                                        activebackground=self._pal('panel'),
                                        activeforeground=self._pal('text'),
@@ -1350,62 +1343,64 @@ class HimawariGUI:
         self._font_widgets.append((reverse_check, 'body', False))
         reverse_check.pack(anchor=tk.W, pady=(10, 0))
 
-        self.contour_var = tk.BooleanVar(value=False)
-        contour_check = tk.Checkbutton(inner, text="等值线叠加",
-                                       variable=self.contour_var,
-                                       bg=self._pal('panel'), fg=self._pal('text_secondary'),
-                                       activebackground=self._pal('panel'),
-                                       activeforeground=self._pal('text'),
-                                       selectcolor=self._pal('input'),
-                                       highlightthickness=0, bd=0,
-                                       font=self._font('body'), anchor=tk.W)
-        self._register(contour_check, bg='panel', fg='text_secondary',
-                       activebackground='panel', activeforeground='text',
-                       selectcolor='input')
-        self._font_widgets.append((contour_check, 'body', False))
-        contour_check.pack(anchor=tk.W, pady=(6, 0))
+        # 色带两端刻度在构造期就要显示真实范围，否则在首次点击色阶前是空白
+        self._update_ramp_ticks()
 
-        # === 输出队列 ===
-        self._create_section_header(inner, "输出队列", margin_top=20)
+    def _current_scheme(self):
+        """当前选中的色阶名；控件尚未建好时退回红外默认色阶。"""
+        getter = getattr(self, 'scheme_var', None)
+        if getter is None:
+            return DATA_TYPES['IR']['default_scheme']
+        value = getter.get()
+        return value or DATA_TYPES['IR']['default_scheme']
 
-        self.queue_labels = []
-        for index in range(3):
-            card = tk.Frame(inner, bg=self._pal('surface'),
-                            highlightbackground=self._pal('border'),
-                            highlightthickness=1)
-            self._register(card, bg='surface', highlightbackground='border')
-            card.pack(fill=tk.X, pady=(8, 0))
-            text = tk.Label(card, text="—", bg=self._pal('surface'),
-                            fg=self._pal('text_subtle'), font=self._font('caption'),
-                            anchor=tk.W, padx=10, pady=6)
-            self._register(text, bg='surface', fg='text_subtle')
-            self._font_widgets.append((text, 'caption', False))
-            text.pack(fill=tk.X)
-            self.queue_labels.append(text)
+    def _on_scheme_change(self, event=None):
+        """色阶或反转改变时：刷新色带预览与两端刻度。"""
+        self._paint_ramp_preview()
+        self._update_ramp_ticks()
+
+    def _update_ramp_ticks(self):
+        """两端刻度显示色阶表的真实取值区间（反转时两端对调）。"""
+        try:
+            _, norm = my_color_map(self._current_scheme())
+        except Exception:
+            return
+        low, high = norm.vmin, norm.vmax
+        if getattr(self, 'reverse_var', None) is not None and self.reverse_var.get():
+            low, high = high, low
+        left = getattr(self, 'ramp_tick_left', None)
+        right = getattr(self, 'ramp_tick_right', None)
+        if left is not None and right is not None:
+            left.configure(text=f"{low:g}")
+            right.configure(text=f"{high:g}")
 
     def _paint_ramp_preview(self, event=None):
-        """重绘色带预览：canvas 图形项不随主题变色，必须整体重建。"""
+        """重绘色带预览：canvas 图形项不随主题变色，必须整体重建。
+
+        直接取当前色阶的真实颜色，而不是写死一串色标——
+        否则预览与实际出图对不上，用户会按错的预览调参。
+        """
         canvas = getattr(self, 'ramp_canvas', None)
         if canvas is None:
             return
         canvas.delete('all')
         width = canvas.winfo_width()
+        height = max(canvas.winfo_height(), 10)
         if width <= 1:
             return
-        steps = 48
-        # 红外窗区标准色阶的粗粒度镜像（暗→亮 = 冷→暖）
-        stops = ('#0b1020', '#3b0764', '#7e22ce', '#b91c1c',
-                 '#f97316', '#fde047', '#f8fafc')
+        try:
+            cmap, _ = my_color_map(self._current_scheme())
+        except Exception:
+            return
+        if getattr(self, 'reverse_var', None) is not None and self.reverse_var.get():
+            cmap = cmap.reversed()
+        steps = max(2, min(width, 96))
         for index in range(steps):
             position = index / (steps - 1)
-            scaled = position * (len(stops) - 1)
-            low = int(scaled)
-            high = min(low + 1, len(stops) - 1)
-            mix = scaled - low
-            color = _blend_hex(stops[low], stops[high], mix)
+            color = matplotlib.colors.to_hex(cmap(position))
             x0 = width * index / steps
             x1 = width * (index + 1) / steps
-            canvas.create_rectangle(x0, 0, x1, 10, fill=color, outline='')
+            canvas.create_rectangle(x0, 0, x1, height, fill=color, outline='')
 
     def _create_status_bar(self, parent):
         """创建底部状态栏：左状态 + 中时间轴刻度 + 右队列信息。
@@ -1639,7 +1634,15 @@ class HimawariGUI:
                 "GOES 全圆盘仅提供每 10 分钟一个时次，请选择 00、10、20、30、40 或 50 分钟。",
             )
             return
-        
+
+        # 色阶范围与反转在提交前先校验，避免白等一次下载才发现参数非法
+        try:
+            vmin, vmax = self._read_range_inputs()
+        except ValueError as error:
+            self._show_error_dialog("温度范围错误", str(error))
+            return
+        reverse_cmap = bool(self.reverse_var.get()) if getattr(self, 'reverse_var', None) else False
+
         self._next_task_id += 1
         task_id = self._next_task_id
         self._active_task_id = task_id
@@ -1651,11 +1654,30 @@ class HimawariGUI:
         self.root.update()
         
         thread = threading.Thread(target=self._draw_worker, 
-                                  args=(task_id, full_time, scheme, region, data_type, band, platform))
+                                  args=(task_id, full_time, scheme, region, data_type, band,
+                                        platform, vmin, vmax, reverse_cmap))
         thread.daemon = True
         thread.start()
-        
-    def _draw_worker(self, task_id, time_str, scheme, region, data_type, band, platform='Himawari-9'):
+
+    def _read_range_inputs(self):
+        """读取温度范围输入框。
+
+        留空表示"用色阶表自带范围"（返回 None），这样默认状态下出图与
+        未加这两个控件时完全一致。填了就必须是合法数字且 min < max。
+        """
+        raw_min = self.vmin_var.get().strip() if getattr(self, 'vmin_var', None) else ''
+        raw_max = self.vmax_var.get().strip() if getattr(self, 'vmax_var', None) else ''
+        try:
+            vmin = float(raw_min) if raw_min else None
+            vmax = float(raw_max) if raw_max else None
+        except ValueError:
+            raise ValueError(f"温度范围必须是数字，当前为 {raw_min!r} ~ {raw_max!r}")
+        if vmin is not None and vmax is not None and not vmax > vmin:
+            raise ValueError(f"温度范围下限必须小于上限，当前为 {vmin:g} ~ {vmax:g}")
+        return vmin, vmax
+
+    def _draw_worker(self, task_id, time_str, scheme, region, data_type, band,
+                     platform='Himawari-9', vmin=None, vmax=None, reverse_cmap=False):
         """后台绘制工作线程"""
         try:
             def report_download_progress(downloaded_bytes, total_bytes, file_index, file_count):
@@ -1672,6 +1694,7 @@ class HimawariGUI:
                 time_str=time_str, scheme=scheme, region=region,
                 data_type=data_type, band=band, add_decorations=True,
                 progress_callback=report_download_progress, platform=platform,
+                vmin=vmin, vmax=vmax, reverse_cmap=reverse_cmap,
             )
             self._enqueue_ui_call(self._on_draw_success, task_id, out_path, data, extent, scheme)
 
