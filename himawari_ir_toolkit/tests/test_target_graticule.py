@@ -13,11 +13,49 @@ from himawari_ir_toolkit.draw_ir_fulldisk import (
     draw_target_graticule_and_labels,
     get_decoration_subplot_adjustments,
     get_decoration_layout_metrics,
+    _figure_size_for_native_pixels,
     _pick_nearest_point_index,
     _split_valid_segments,
     downsample_for_render,
     get_render_stride,
 )
+
+
+class TestNativePixelMapping(unittest.TestCase):
+    """画布尺寸必须让**绘图区**等于数据像素，否则数据被降采样、细节丢失。
+
+    历史缺陷：figsize 只按 nx/dpi 算，而装饰模式的 subplots_adjust 会把绘图区
+    缩到画布的 86.5%（目标区域），导致 2000² 的数据实际只画进 1746² 个像素，
+    损失 12.7% 线性分辨率——用户反馈"机动观测的清晰度不像原版"正是这个原因。
+    """
+
+    def _axes_pixels(self, nx, ny, region, dpi, decorations):
+        fig_w, fig_h = _figure_size_for_native_pixels(nx, ny, dpi, region, decorations)
+        adjust = get_decoration_subplot_adjustments(region, decorations)
+        axes_w = fig_w * dpi * (adjust['right'] - adjust['left'])
+        axes_h = fig_h * dpi * (adjust['top'] - adjust['bottom'])
+        return axes_w, axes_h
+
+    def test_target_decorated_maps_one_to_one(self):
+        axes_w, axes_h = self._axes_pixels(2000, 2000, "Target", 150, True)
+        self.assertAlmostEqual(axes_w, 2000, delta=1.0)
+        self.assertAlmostEqual(axes_h, 2000, delta=1.0)
+
+    def test_fldk_decorated_maps_one_to_one(self):
+        axes_w, axes_h = self._axes_pixels(5500, 5500, "FLDK", 150, True)
+        self.assertAlmostEqual(axes_w, 5500, delta=1.0)
+        self.assertAlmostEqual(axes_h, 5500, delta=1.0)
+
+    def test_undecorated_behaviour_is_unchanged(self):
+        """无装饰时绘图区占满画布，应退化成旧的 nx/dpi，行为完全一致。"""
+        fig_w, fig_h = _figure_size_for_native_pixels(2000, 1600, 150, "Target", False)
+        self.assertAlmostEqual(fig_w, 2000 / 150, places=6)
+        self.assertAlmostEqual(fig_h, 1600 / 150, places=6)
+
+    def test_non_square_data_keeps_aspect(self):
+        axes_w, axes_h = self._axes_pixels(1600, 1200, "Target", 150, True)
+        self.assertAlmostEqual(axes_w, 1600, delta=1.0)
+        self.assertAlmostEqual(axes_h, 1200, delta=1.0)
 
 
 class TestTargetGraticuleHelpers(unittest.TestCase):

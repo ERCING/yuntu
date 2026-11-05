@@ -2190,7 +2190,12 @@ class HimawariGUI:
             
             if self.current_resized_img is not None:
                 self.current_resized_img.close()
-            resized_img = self.original_img.resize((display_width, display_height), Image.NEAREST)
+            # 缩小时用 LANCZOS：整幅云图（几千像素）塞进几百像素的画布，
+            # 用 NEAREST 会直接丢像素，细节变成噪点、看着比实际糊很多。
+            # 放大时仍用 NEAREST：用户是想看清单个像素，不该被插值平滑掉。
+            shrinking = (display_width < img_width) or (display_height < img_height)
+            resample = Image.LANCZOS if shrinking else Image.NEAREST
+            resized_img = self.original_img.resize((display_width, display_height), resample)
             self.current_resized_img = resized_img
             self.current_tk_image = ImageTk.PhotoImage(resized_img)
             

@@ -480,6 +480,33 @@ def _resolve_colormap(scheme, vmin, vmax, reverse_cmap):
     return cmap, norm
 
 
+def _figure_size_for_native_pixels(nx, ny, dpi, region_full, add_decorations):
+    """按"绘图区恰好等于数据像素"反推画布尺寸。
+
+    imshow 把 N 个数据像素铺到 M 个输出像素上：M<N 就是降采样（细节直接丢失），
+    M>N 就是把像素放大。`interpolation='none'` 只关掉插值，挡不住栅格尺寸不匹配。
+    而装饰模式要给标题和色标让位，`subplots_adjust` 会把绘图区缩到画布的
+    left~right / bottom~top 之间（目标区域只有 86.5%×90%），如果画布仍按
+    nx/dpi 定尺寸，数据就会被压进更小的栅格。
+
+    实测（dpi=150）：
+        目标区域 2000×2000 数据 → 绘图区 1746×1746，损失 12.7% 线性分辨率；
+        全圆盘   5500×5500 数据 → 绘图区 5159×5159，损失 6.2%。
+
+    所以这里按绘图区占比反算画布尺寸：让 axes 正好 nx×ny 像素，装饰占用
+    画布剩下的部分。无装饰时占比为 1，退化成 nx/dpi，与旧行为完全一致。
+    """
+    adjust = get_decoration_subplot_adjustments(region_full, add_decorations)
+    axes_fraction_w = max(1e-6, adjust['right'] - adjust['left'])
+    axes_fraction_h = max(1e-6, adjust['top'] - adjust['bottom'])
+    fig_w = nx / (dpi * axes_fraction_w)
+    fig_h = ny / (dpi * axes_fraction_h)
+    # 注意：这里不能再额外加 0.12 英寸。色标柱、刻度、信息栏都落在
+    # (1 - right) / (1 - top) 这些**画布余量**里；一旦往画布上加宽，
+    # axes 会跟着变宽、数据反而被放大，1:1 就失效了。
+    return fig_w, fig_h
+
+
 def draw_satellite_scene(scene, scheme, out_path, dpi, add_decorations=False,
                          progress_callback=None, vmin=None, vmax=None, reverse_cmap=False):
     data_type = _resolve_data_type_from_scheme(scheme)
@@ -501,10 +528,7 @@ def draw_satellite_scene(scene, scheme, out_path, dpi, add_decorations=False,
     geos_crs = build_scene_geostationary_crs(scene)
 
     ny, nx = render_data.shape
-    fig_w = nx / dpi
-    fig_h = ny / dpi
-    if add_decorations:
-        fig_w += 0.12
+    fig_w, fig_h = _figure_size_for_native_pixels(nx, ny, dpi, scene.region, add_decorations)
 
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor="white")
     try:
@@ -770,14 +794,12 @@ def draw_ir_fulldisk(time_str=DEFAULT_TIME, scheme='IR-CC',
 
     render_data = data
 
-    # 根据渲染数据尺寸和dpi计算figsize
+    # 根据渲染数据尺寸和dpi计算figsize。
+    # 关键：让**绘图区**（而不是整张画布）等于数据像素，否则装饰模式下
+    # subplots_adjust 会把绘图区缩到画布的 86.5%~93.8%，数据被降采样、
+    # 细节直接丢失（目标区域实测损失 12.7% 线性分辨率）。
     ny, nx = render_data.shape
-    fig_w = nx / dpi
-    fig_h = ny / dpi
-
-    # 装饰模式: 预留右侧色阶柱与顶部信息栏空间
-    if add_decorations:
-        fig_w += 0.12
+    fig_w, fig_h = _figure_size_for_native_pixels(nx, ny, dpi, region_full, add_decorations)
 
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor='white')
 
