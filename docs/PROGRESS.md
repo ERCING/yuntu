@@ -112,8 +112,8 @@
 
 **P2**
 8. 文档三套色板互相冲突（`docs/superpowers/*` 与 `.design/*`），`.design` 的三栏 Web 工作台与"不得新增控件"的 spec 结构性对立。
-9. ~~无 README / 安装说明 / CLI 参考~~ **已解决**（新增根目录 `README.md`）。
-   遗留：无 LICENSE / 架构文档；`himawari_ir_toolkit/` 没有 `__init__.py`（靠命名空间包工作）；根目录 `tests/` 只剩一个孤儿 `.pyc`。
+9. ~~无 README / 安装说明 / CLI 参考~~ **已解决**（新增根目录 `README.md`，并补 `docs/ARCHITECTURE.md`）。
+   遗留：无 LICENSE；`himawari_ir_toolkit/` 没有 `__init__.py`（靠命名空间包工作）；根目录 `tests/` 只剩一个孤儿 `.pyc`。
 10. 两份 `debug-*.md` 仍未闭环；`ttk-button-contrast` 的埋点日志是 0 字节。
 11. `get_decoration_layout_metrics` 的 `cbar_width` 仍保留 `max(0.018, ...)` 下限，对 5500px 宽图实际约 99px，与 18px 像素预算不符（本轮按要求**未动**）。
 

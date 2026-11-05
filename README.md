@@ -225,6 +225,7 @@ himawari_ir_toolkit/
 ├── data/                    本地示例产物
 └── tests/                   unittest 测试套件
 docs/
+├── ARCHITECTURE.md          分层、数据流、关键契约、扩展点与已踩过的坑
 ├── PROGRESS.md              进度、验证状态与已知问题
 ├── superpowers/specs/       设计规格
 ├── superpowers/plans/       实施计划
