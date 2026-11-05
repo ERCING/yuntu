@@ -21,6 +21,7 @@ Himawari-9 卫星云图绘制脚本
 import sys
 import os
 import argparse
+import tempfile
 import warnings
 from datetime import datetime, timezone
 import numpy as np
@@ -41,8 +42,34 @@ warnings.filterwarnings('ignore', message='.*Downloading.*', category=UserWarnin
 
 # 设置 pycontrails 缓存目录到项目目录，避免沙箱限制
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(PROJECT_DIR, 'pycontrails_cache')
-os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def _resolve_cache_dir():
+    """挑一个**可写**的 pycontrails 缓存目录，绝不因目录不可写而抛异常。
+
+    优先用模块目录下的 pycontrails_cache（沿用既有约定：缓存与项目同处，
+    便于一处清理）。但打包成 exe 后模块目录位于 `_internal/` 之下，若程序被
+    安装到只读位置（如 `C:\\Program Files\\`），创建目录会抛 OSError；而这段
+    代码在**导入期**执行，一旦抛出，整个程序在启动阶段就崩掉，用户只会看到
+    "Unhandled exception in script"。因此按"项目目录 → 用户级目录 → 临时目录"
+    逐级回落，最后一档即使不可建也不抛，交给下游按需报错。
+    """
+    user_root = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+    candidates = [
+        os.path.join(PROJECT_DIR, 'pycontrails_cache'),
+        os.path.join(user_root, 'HimawariIRToolkit', 'pycontrails_cache'),
+        os.path.join(tempfile.gettempdir(), 'HimawariIRToolkit', 'pycontrails_cache'),
+    ]
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            return candidate
+        except OSError:
+            continue
+    return tempfile.gettempdir()
+
+
+CACHE_DIR = _resolve_cache_dir()
 os.environ['PYCONTRAILS_CACHE_DIR'] = CACHE_DIR
 
 # 导入自定义色阶

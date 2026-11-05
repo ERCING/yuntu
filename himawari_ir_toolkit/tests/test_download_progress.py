@@ -1,8 +1,10 @@
 import ast
 import importlib
 import io
+import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -11,6 +13,45 @@ import numpy as np
 
 from himawari_ir_toolkit.draw_ir_fulldisk import DATA_TYPES, _download_s3_files_with_progress
 from himawari_ir_toolkit.mycolor import my_color_map
+
+
+class TestCacheDirResolution(unittest.TestCase):
+    """缓存目录解析必须"永不抛异常"。
+
+    这段代码在导入期执行，冻结后的 exe 若被装到只读位置（如 Program Files），
+    创建 `_internal/pycontrails_cache` 会抛 OSError，整个程序在启动阶段就崩。
+    历史问题：直接 os.makedirs 且无兜底。
+    """
+
+    def setUp(self):
+        self.module = importlib.import_module("himawari_ir_toolkit.draw_ir_fulldisk")
+
+    def test_prefers_project_directory_when_writable(self):
+        with patch.object(self.module.os, "makedirs") as makedirs:
+            path = self.module._resolve_cache_dir()
+        self.assertEqual(
+            path, os.path.join(self.module.PROJECT_DIR, "pycontrails_cache")
+        )
+        self.assertTrue(makedirs.called)
+
+    def test_falls_back_to_user_directory_when_project_directory_readonly(self):
+        project_prefix = self.module.PROJECT_DIR
+
+        def fake_makedirs(path, exist_ok=False):
+            if os.path.abspath(path).startswith(project_prefix):
+                raise OSError(13, "Access is denied")
+
+        with patch.object(self.module.os, "makedirs", side_effect=fake_makedirs):
+            path = self.module._resolve_cache_dir()
+
+        self.assertFalse(os.path.abspath(path).startswith(project_prefix))
+        self.assertIn("HimawariIRToolkit", path)
+
+    def test_never_raises_when_every_candidate_is_unusable(self):
+        with patch.object(self.module.os, "makedirs", side_effect=OSError(13, "denied")):
+            path = self.module._resolve_cache_dir()
+
+        self.assertEqual(path, tempfile.gettempdir())
 
 
 class _FakeReader(io.BytesIO):
