@@ -814,6 +814,8 @@ class HimawariGUI:
         holder = tk.Frame(row, bg=self._pal('panel'))
         self._register(holder, bg='panel')
         holder.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # 把标签挂在容器上，方便需要时动态改文案（如"时次"要显示当前观测节奏）
+        holder.label = label
         return holder
 
     def _create_title_bar(self, parent):
@@ -1025,7 +1027,8 @@ class HimawariGUI:
         self._update_days()
 
         # 时次
-        time_row = self._inline_field(inner_frame, "时次")
+        time_row = self._inline_field(inner_frame, "时次", label_width=10)
+        self._time_label = time_row.label
         self.time_var = tk.StringVar()
         time_list = [f"{h:02d}:00:00" for h in range(24)]
         self.time_combo = ttk.Combobox(time_row, textvariable=self.time_var,
@@ -1057,6 +1060,11 @@ class HimawariGUI:
         # 区域切换会改变观测节奏（全圆盘 10 分钟 / 机动观测 2.5 分钟），必须重建时次列表
         self.region_combo.bind('<<ComboboxSelected>>', lambda _event: self._refresh_time_slots())
         self.region_var.set('F (全圆盘)')
+
+        # 构造期必须按真实节奏重建一次时次列表。否则会留着创建 time_combo 时
+        # 那 24 个整点硬编码，界面一打开显示的就是"每小时一张"的错误列表
+        # （全圆盘应为 144 个 10 分钟时次）。这里要放在平台/区域都建好之后。
+        self._refresh_time_slots()
         
         # === 数据与显示 ===
         self._create_section_header(inner_frame, "数据与显示", margin_top=14)
@@ -1597,6 +1605,17 @@ class HimawariGUI:
             return
 
         current = self.time_var.get()
+
+        # 关闭状态下输入框显示的仍是同一个时次（09:00:00 在两种网格里都合法），
+        # 用户不展开下拉就看不出列表变了。标签里直接标出当前节奏与数量。
+        label = getattr(self, '_time_label', None)
+        if label is not None:
+            cadence = '2.5min' if region == 'T' else '10min'
+            try:
+                label.configure(text=f"时次/{cadence}")
+            except tk.TclError:
+                pass
+
         self.time_combo['values'] = slots
         if current in slots:
             return

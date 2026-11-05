@@ -954,6 +954,11 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
             root.update_idletasks()
             root.update()
 
+            # 构造期就应按真实节奏建好时次列表。原先留着创建控件时那 24 个
+            # 整点硬编码，界面一打开显示的是"每小时一张"的错误列表。
+            self.assertEqual(len(app.time_combo["values"]), 144)
+            self.assertIn("时次/10min", app._time_label.cget("text"))
+
             app.platform_var.set("GOES-18")
             app._on_platform_change(None)
             root.update()
@@ -974,6 +979,19 @@ class TestGUIBuildsWithRealTk(unittest.TestCase):
             self.assertIn("00:02:30", app.time_combo["values"])
             self.assertIn("00:05:00", app.time_combo["values"])
             self.assertNotIn("00:00:30", app.time_combo["values"])
+            # 关闭状态下输入框显示的时次两种网格里都合法，不展开下拉看不出列表变了，
+            # 所以标签必须同步标出当前节奏。
+            self.assertIn("时次/2.5min", app._time_label.cget("text"))
+
+            # 切回全圆盘：非网格时次应回落到该小时内第一个合法时次
+            app.time_var.set("09:02:30")
+            app.region_var.set("F (全圆盘)")
+            app._refresh_time_slots()
+            root.update()
+            self.assertEqual(len(app.time_combo["values"]), 144)
+            self.assertNotIn("09:02:30", app.time_combo["values"])
+            self.assertEqual(app.time_var.get(), "09:00:00")
+            self.assertIn("时次/10min", app._time_label.cget("text"))
 
             app._clear_image()
             root.update()
