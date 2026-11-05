@@ -86,11 +86,21 @@ class TestTargetGraticuleCartopy(unittest.TestCase):
 class TestDecorationLayoutMetrics(unittest.TestCase):
     def test_layout_metrics_follow_pixel_targets_for_large_figure(self):
         m = get_decoration_layout_metrics(region_full="FLDK", fig_w=36.7, fig_h=36.7, dpi=150)
-        self.assertEqual(m["info_fontsize"], 35)
-        self.assertEqual(m["cbar_tick_size"], 35)
+        self.assertEqual(m["info_fontsize"], 20)
+        self.assertEqual(m["cbar_tick_size"], 14)
         self.assertAlmostEqual(m["header_gap_fig"], 22 / (36.7 * 150), places=6)
         self.assertAlmostEqual(m["cbar_gap"], 10 / (36.7 * 150), places=6)
         self.assertGreaterEqual(m["cbar_width"], 0.018)
+
+    def test_layout_metrics_ignore_platform_region(self):
+        # "F" 是 GOES 场景实际传入的取值（Scene.region 恒为 "F"），
+        # 必须与 Himawari 的 "FLDK" 得到完全相同的字号，否则两条渲染管线出图会不一致。
+        fldk = get_decoration_layout_metrics(region_full="FLDK", fig_w=36.7, fig_h=36.7, dpi=150)
+        goes = get_decoration_layout_metrics(region_full="F", fig_w=36.7, fig_h=36.7, dpi=150)
+        target = get_decoration_layout_metrics(region_full="Target", fig_w=36.7, fig_h=36.7, dpi=150)
+        for other in (goes, target):
+            self.assertEqual(fldk["info_fontsize"], other["info_fontsize"])
+            self.assertEqual(fldk["cbar_tick_size"], other["cbar_tick_size"])
 
     def test_layout_metrics_clamp_small_figure_sizes(self):
         m = get_decoration_layout_metrics(region_full="Target", fig_w=3.45, fig_h=3.33, dpi=150)

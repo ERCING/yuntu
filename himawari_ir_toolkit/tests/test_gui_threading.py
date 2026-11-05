@@ -155,7 +155,7 @@ class TestGUIStyles(unittest.TestCase):
             style_map = source[map_start:map_end]
             self.assertIn("'disabled'", style_map, f"{style_name} 缺少 disabled 前景色")
             self.assertIn("'!disabled'", style_map, f"{style_name} 缺少启用态前景色")
-            self.assertIn("('disabled', TEXT_SUBTLE)", style_map, f"{style_name} disabled 前景色应统一为弱化灰")
+            self.assertIn("('disabled', p['text_subtle'])", style_map, f"{style_name} disabled 前景色应统一为当前主题的弱化灰")
 
     def test_status_feedback_defines_four_states_and_uses_each_lifecycle_state(self):
         source_path = Path(__file__).resolve().parents[1] / "himawari_gui.py"
@@ -170,17 +170,19 @@ class TestGUIStyles(unittest.TestCase):
         for kind in ("'Working'", "'Success'", "'Error'", "'Ready'"):
             self.assertIn(kind, status_color_source)
 
-        # 四态配色必须取自浅色调色板。
-        # 调色板已提升为模块级常量，_get_status_color 内只引用常量名，
-        # 因此断言「常量名 + 模块级色值定义」两处，而非函数体内的裸色值。
-        for constant, color in (
-            ("PRIMARY", "#2563eb"),
-            ("SUCCESS", "#059669"),
-            ("ERROR", "#dc2626"),
-            ("TEXT_SUBTLE", "#9ca3af"),
+        # 四态配色必须走当前主题的令牌，深色主题下不能再落回浅色常量。
+        # 令牌色值断言落在模块级常量定义上，避免函数体直接写裸色值。
+        for token, constant, color in (
+            ("'primary'", "PRIMARY", "#2563eb"),
+            ("'success'", "SUCCESS", "#059669"),
+            ("'error'", "ERROR", "#dc2626"),
+            ("'text_subtle'", "TEXT_SUBTLE", "#9ca3af"),
         ):
-            self.assertIn(constant, status_color_source)
+            self.assertIn(token, status_color_source)
             self.assertIn(f"{constant} = '{color}'", source)
+        # 函数体内不得出现裸色值：配色必须全部来自令牌表，
+        # 否则又会出现「样式表/控件/状态色」三份互相漂移的老问题。
+        self.assertNotIn("'#", status_color_source)
         # 不得回退到上一版深色主题的荧光色
         for stale_color in ("#58a6ff", "#3fb950", "#f85149", "#6e7681"):
             self.assertNotIn(stale_color, source)
@@ -239,6 +241,28 @@ class TestGUIThreading(unittest.TestCase):
         HimawariGUI._process_ui_queue(app)
 
         self.assertEqual(received, ["ok"])
+        self.assertEqual(len(app.root.after_calls), 1)
+
+    def test_process_ui_queue_survives_callback_exception_and_reschedules(self):
+        """坏回调不能顶掉续排：泵一停，下载进度与失败弹窗会永久静默。"""
+        app = object.__new__(HimawariGUI)
+        app.root = _FakeRoot()
+        app.ui_queue = queue.Queue()
+        received = []
+
+        def boom():
+            raise RuntimeError("worker callback failed")
+
+        app.ui_queue.put((boom, (), {}))
+        app.ui_queue.put((received.append, ("after-boom",), {}))
+
+        with patch("himawari_ir_toolkit.himawari_gui.traceback.print_exc") as log:
+            HimawariGUI._process_ui_queue(app)
+
+        # 前一个回调抛异常，后一个仍要执行
+        self.assertEqual(received, ["after-boom"])
+        # 异常要留痕，但泵必须照常续排
+        self.assertTrue(log.called)
         self.assertEqual(len(app.root.after_calls), 1)
 
     def test_download_progress_updates_text_and_byte_progress_bar(self):

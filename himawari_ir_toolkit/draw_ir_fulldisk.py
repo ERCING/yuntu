@@ -211,6 +211,12 @@ def downsample_for_render(data: np.ndarray, max_dimension: int = 11000) -> np.nd
 
 
 def get_decoration_layout_metrics(region_full: str, fig_w: float, fig_h: float, dpi: int) -> dict[str, float]:
+    '''按固定像素预算换算图面装饰的尺寸与间距。
+
+    字号完全由画布像素尺寸与 dpi 决定，与区域/平台无关：region_full 仅为
+    保持既有调用签名而保留，不参与任何字号计算。按区域区分的装饰留白由
+    get_decoration_subplot_adjustments 负责。
+    '''
     fig_w_px = fig_w * dpi
     fig_h_px = fig_h * dpi
 
@@ -228,10 +234,6 @@ def get_decoration_layout_metrics(region_full: str, fig_w: float, fig_h: float, 
     width_limited_ticks = _clamp(round(fig_w_px / 110), 6, 16)
     info_fontsize = min(info_fontsize, width_limited_info)
     cbar_tick_size = min(cbar_tick_size, width_limited_ticks)
-
-    if region_full == "FLDK":
-        info_fontsize = 35
-        cbar_tick_size = 35
 
     return {
         "info_fontsize": info_fontsize,
